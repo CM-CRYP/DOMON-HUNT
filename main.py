@@ -238,12 +238,17 @@ async def on_ready():
     print(f'Bot connecté comme {bot.user} !')
     spawn_task.start()
 
-@commands.has_permissions(administrator=True)
 @bot.command(name="setspawn")
 async def set_spawn_channel(ctx):
+    authorized_id = "865185894197887018"  # Crypto13 | CM MYİKKİ
+    if str(ctx.author.id) != authorized_id:
+        await ctx.send("❌ Only the bot owner can use this command.")
+        return
+
     config["spawn_channel_id"] = ctx.channel.id
     save_config(config)
-    await ctx.send("✅ Ce salon est désormais le canal de spawn des DOMON !")
+    await ctx.send("✅ This channel is now the official DOMON spawn point!")
+
 
 @bot.command(name="start")
 async def start_game(ctx):
