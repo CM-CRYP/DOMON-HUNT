@@ -55,8 +55,7 @@ spawn_channel_id = None   # Pour configurer où les DOMON spawnent
 active_spawn = False
 
 # ------- Liste des 151 DOMON (évolutions incluses) -------
-    # N° | Name | Type | Rarity | Evolution | Description
-   DOMON_LIST = [
+DOMON_LIST = [
     {"num": 1, "name": "Craquos", "type": "Structure", "rarity": "Common", "evolution": "Fissuron", "description": "Small crack spirit, dwells in old walls."},
     {"num": 2, "name": "Fissuron", "type": "Structure", "rarity": "Uncommon", "evolution": "Seismorph", "description": "Its power shakes the foundations."},
     {"num": 3, "name": "Seismorph", "type": "Structure", "rarity": "Rare", "evolution": None, "description": "The king of structural tremors."},
