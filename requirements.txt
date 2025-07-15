@@ -1,4 +1,4 @@
-discord.py==2.2.3
+nextcord==2.6.0
 python-dotenv
 flask
 pytz
