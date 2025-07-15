@@ -435,17 +435,22 @@ async def capture(ctx):
         spawned_domon = None
         await ctx.send(f"❌ {ctx.author.mention} failed to capture the DOMON... It escaped!")
 
-@commands.has_permissions(administrator=True)
 @bot.command(name="forcespawn")
 async def forcespawn(ctx):
+    authorized_id = "865185894197887018"  # Crypto13 | CM MYİKKİ
+    if str(ctx.author.id) != authorized_id:
+        await ctx.send("❌ Only the bot owner can use this command.")
+        return
+
     global spawned_domon, active_spawn
     if active_spawn:
-        await ctx.send("A DOMON is already spawned.")
+        await ctx.send("⚠️ A DOMON is already spawned.")
         return
     domon = random.choice(DOMON_LIST)
     spawned_domon = domon
     active_spawn = True
     await ctx.send(f"**(Admin)** A wild DOMON appeared!\n**#{domon['num']:03d} {domon['name']}**\nType: {domon['type']} | Rarity: {domon['rarity']}\n_Description_: {domon['description']}\nType `!scan` to try to detect it!")
+
 
 def check_evolution(user_id):
     player = players[user_id]
