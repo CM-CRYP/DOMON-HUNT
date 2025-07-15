@@ -5,11 +5,12 @@ import random
 import asyncio
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
-
-# === Pour keep-alive sur Render (anti-sommeil) ===
 from threading import Thread
 from flask import Flask
+from datetime import datetime
+import pytz
 
+# === Keep-alive Flask server ===
 app = Flask('')
 
 @app.route('/')
@@ -35,23 +36,33 @@ intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ====== BASE DE DONNÉES PERSISTANTE (JSON) ======
+# === Base de données JSON ===
 SAVE_FILE = "players.json"
+CONFIG_FILE = "config.json"
 
 def load_players():
     if os.path.exists(SAVE_FILE):
         with open(SAVE_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
-    else:
-        return {}
+    return {}
 
 def save_players(players):
     with open(SAVE_FILE, "w", encoding="utf-8") as f:
         json.dump(players, f, ensure_ascii=False, indent=2)
 
-players = load_players()  # {user_id: {...infos joueur...}}
-spawned_domon = None      # DOMON actuel dans le salon
-spawn_channel_id = None   # Pour configurer où les DOMON spawnent
+def load_config():
+    if os.path.exists(CONFIG_FILE):
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {"spawn_channel_id": None}
+
+def save_config(config):
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(config, f, ensure_ascii=False, indent=2)
+
+players = load_players()
+config = load_config()
+spawned_domon = None
 active_spawn = False
 
 # ------- Liste des 151 DOMON (évolutions incluses) -------
@@ -209,7 +220,6 @@ DOMON_LIST = [
     {"num": 151, "name": "MYİKKİMONE", "type": "Climat", "rarity": "Legendary", "evolution": None, "description": "Legendary spirit, protects homes forever."}
 ]
 
-
 RARITY_PROBA = {
     "Common": 55,
     "Uncommon": 24,
@@ -218,13 +228,10 @@ RARITY_PROBA = {
 }
 
 STARTER_PACK = {"Domoball": 5, "Scan Tool": 1}
-
 DAILY_REWARDS = {
     "Domoball": 3,
     "bonus_items": ["Scan Tool", "Small Repair Kit", "CryptoStamp", "Architectrap", "SpectraSeal", "BIMNet"]
 }
-
-# ====== COMMANDES DISCORD ======
 
 @bot.event
 async def on_ready():
@@ -234,9 +241,9 @@ async def on_ready():
 @commands.has_permissions(administrator=True)
 @bot.command(name="setspawn")
 async def set_spawn_channel(ctx):
-    global spawn_channel_id
-    spawn_channel_id = ctx.channel.id
-    await ctx.send("Ce salon est désormais le canal de spawn des DOMON !")
+    config["spawn_channel_id"] = ctx.channel.id
+    save_config(config)
+    await ctx.send("✅ Ce salon est désormais le canal de spawn des DOMON !")
 
 @bot.command(name="start")
 async def start_game(ctx):
@@ -257,11 +264,9 @@ async def start_game(ctx):
 
 @bot.command(name="daily")
 async def daily(ctx):
-    user_id = str(ctx.author.id)
-    from datetime import datetime, timedelta
-    import pytz
     tz = pytz.timezone("Europe/Paris")
     now = datetime.now(tz).date()
+    user_id = str(ctx.author.id)
     player = players.get(user_id)
     if not player:
         await ctx.send("Type `!start` to begin your hunt!")
@@ -270,9 +275,9 @@ async def daily(ctx):
         await ctx.send("You already claimed your daily reward today!")
         return
     player["daily"] = str(now)
-    player["inventory"]["Domoball"] = player["inventory"].get("Domoball",0) + DAILY_REWARDS["Domoball"]
+    player["inventory"]["Domoball"] = player["inventory"].get("Domoball", 0) + DAILY_REWARDS["Domoball"]
     bonus = random.choice(DAILY_REWARDS["bonus_items"])
-    player["inventory"][bonus] = player["inventory"].get(bonus,0) + 1
+    player["inventory"][bonus] = player["inventory"].get(bonus, 0) + 1
     save_players(players)
     await ctx.send(f"{ctx.author.mention} received 3 Domoballs and 1 bonus item: **{bonus}**!")
 
@@ -315,12 +320,8 @@ async def domodex(ctx):
     await ctx.send(embed=embed)
 
 @bot.command(name="info")
-async def domon_info(ctx, *, name_or_num:str):
-    domon = None
-    for d in DOMON_LIST:
-        if d["name"].lower() == name_or_num.lower() or str(d["num"]) == name_or_num:
-            domon = d
-            break
+async def domon_info(ctx, *, name_or_num: str):
+    domon = next((d for d in DOMON_LIST if d["name"].lower() == name_or_num.lower() or str(d["num"]) == name_or_num), None)
     if not domon:
         await ctx.send("Unknown DOMON.")
         return
@@ -332,30 +333,62 @@ async def domon_info(ctx, *, name_or_num:str):
     embed.add_field(name="Description", value=domon['description'], inline=False)
     await ctx.send(embed=embed)
 
-# ======= SYSTÈME DE SPAWN, SCAN ET CAPTURE =======
+@bot.command(name="use")
+async def use_item(ctx, *, item_name: str):
+    user_id = str(ctx.author.id)
+    player = players.get(user_id)
+    if not player:
+        await ctx.send("Type `!start` to begin your hunt!")
+        return
+
+    inv = player["inventory"]
+    normalized = item_name.strip().title()
+
+    if normalized not in inv or inv[normalized] <= 0:
+        await ctx.send(f"You don't have any **{normalized}**.")
+        return
+
+    if normalized == "Scan Tool":
+        if not active_spawn or not spawned_domon:
+            await ctx.send("No DOMON to scan right now.")
+            return
+        await ctx.send(f"🔍 {ctx.author.mention} used a **Scan Tool**!\nDOMON: **{spawned_domon['name']}**\nType: {spawned_domon['type']} | Rarity: {spawned_domon['rarity']}\n_Description_: {spawned_domon['description']}")
+
+    elif normalized == "Small Repair Kit":
+        player["xp"] += 1
+        await ctx.send(f"🔧 {ctx.author.mention} used a **Small Repair Kit** and gained +1 XP!")
+
+    elif normalized == "CryptoStamp":
+        bonus = random.choice(DAILY_REWARDS["bonus_items"])
+        player["inventory"][bonus] = player["inventory"].get(bonus, 0) + 1
+        await ctx.send(f"📦 {ctx.author.mention} used a **CryptoStamp** and received 1 bonus item: **{bonus}**!")
+
+    else:
+        await ctx.send("This item has no defined use yet.")
+
+    inv[normalized] -= 1
+    if inv[normalized] <= 0:
+        del inv[normalized]
+    save_players(players)
+
 @tasks.loop(minutes=15)
 async def spawn_task():
     global spawned_domon, active_spawn
-    if not spawn_channel_id:
+    if active_spawn or not config.get("spawn_channel_id"):
         return
-    if active_spawn:
-        return
-    domon = random.choices(DOMON_LIST, weights=[RARITY_PROBA.get(d["rarity"],10) for d in DOMON_LIST], k=1)[0]
+    domon = random.choices(DOMON_LIST, weights=[RARITY_PROBA.get(d["rarity"], 10) for d in DOMON_LIST], k=1)[0]
     spawned_domon = domon
     active_spawn = True
-    channel = bot.get_channel(spawn_channel_id)
+    channel = bot.get_channel(config["spawn_channel_id"])
     if channel:
         await channel.send(f"A wild DOMON appeared!\n**#{domon['num']:03d} {domon['name']}**\nType: {domon['type']} | Rarity: {domon['rarity']}\n_Description_: {domon['description']}\nType `!scan` to try to detect it!")
 
 @bot.command(name="scan")
 async def scan(ctx):
-    global spawned_domon, active_spawn
     if not active_spawn or not spawned_domon:
         await ctx.send("No DOMON to scan right now.")
         return
-    user_id = str(ctx.author.id)
-    player = players.get(user_id)
-    if not player:
+    if str(ctx.author.id) not in players:
         await ctx.send("Type `!start` to begin your hunt!")
         return
     await ctx.send(f"{ctx.author.mention} detected the DOMON!\nType `!capture` to try and catch it!")
@@ -371,7 +404,7 @@ async def capture(ctx):
     if not player:
         await ctx.send("Type `!start` to begin your hunt!")
         return
-    if player["inventory"].get("Domoball",0) < 1:
+    if player["inventory"].get("Domoball", 0) < 1:
         await ctx.send("You have no Domoballs left! Claim with `!daily`.")
         return
     rates = {"Common": 0.90, "Uncommon": 0.65, "Rare": 0.30, "Legendary": 0.10}
@@ -381,23 +414,15 @@ async def capture(ctx):
         player["collection"].append(spawned_domon)
         player["xp"] += 1
         save_players(players)
-        name = spawned_domon['name']
-        await ctx.send(f"🎉 {ctx.author.mention} captured **{name}**! Added to your collection. +1 XP.")
-        # Gérer évolutions (si besoin, à compléter selon ta logique)
-        for d in DOMON_LIST:
-            if d["evolution"] == name and name not in [dom['name'] for dom in player["collection"]]:
-                n = sum(1 for dom in player["collection"] if dom['name']==name)
-                if n >= 3:
-                    next_dom = [dom for dom in DOMON_LIST if dom['name'] == d["evolution"]]
-                    if next_dom:
-                        player["collection"].append(next_dom[0])
-                        save_players(players)
-                        await ctx.send(f"✨ Your {name} evolved into {next_dom[0]['name']}!")
+        msg = f"🎉 {ctx.author.mention} captured **{spawned_domon['name']}**! Added to your collection. +1 XP."
+        evolution_msg = check_evolution(user_id)
+        if evolution_msg:
+            msg += f"\n{evolution_msg}"
         if player["xp"] % 10 == 0:
             item = random.choice(DAILY_REWARDS["bonus_items"])
-            player["inventory"][item] = player["inventory"].get(item,0)+1
-            save_players(players)
-            await ctx.send(f"You reached {player['xp']} XP and received a bonus item: **{item}**!")
+            player["inventory"][item] = player["inventory"].get(item, 0) + 1
+            msg += f"\nYou reached {player['xp']} XP and received a bonus item: **{item}**!"
+        await ctx.send(msg)
         active_spawn = False
         spawned_domon = None
     else:
@@ -417,6 +442,27 @@ async def forcespawn(ctx):
     active_spawn = True
     await ctx.send(f"**(Admin)** A wild DOMON appeared!\n**#{domon['num']:03d} {domon['name']}**\nType: {domon['type']} | Rarity: {domon['rarity']}\n_Description_: {domon['description']}\nType `!scan` to try to detect it!")
 
-# ===== LANCEMENT DU BOT (avec keep-alive) =====
+def check_evolution(user_id):
+    player = players[user_id]
+    collection = player["collection"]
+    evolved_names = {d["name"] for d in collection}
+    counts = {}
+    for domon in collection:
+        counts[domon["name"]] = counts.get(domon["name"], 0) + 1
+    for domon in DOMON_LIST:
+        if domon["evolution"] and domon["evolution"] not in evolved_names:
+            base_name = domon["name"]
+            evo_name = domon["evolution"]
+            required = 3
+            if counts.get(base_name, 0) >= required:
+                evolved_domon = next((d for d in DOMON_LIST if d["name"] == evo_name), None)
+                if evolved_domon:
+                    collection.append(evolved_domon)
+                    player["xp"] += 2
+                    save_players(players)
+                    return f"✨ Your {base_name} evolved into {evo_name}!"
+    return None
+
+# === Lancement du bot ===
 keep_alive()
 bot.run(TOKEN)
