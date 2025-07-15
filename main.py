@@ -1,6 +1,6 @@
 import os
 import json
-import discord
+import nextcord as discord
 import random
 import asyncio
 from discord.ext import commands, tasks
