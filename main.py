@@ -234,9 +234,9 @@ async def on_ready():
     print(f'Bot connecté comme {bot.user} !')
     spawn_task.start()
 
-@bot.command(name="help")
-async def help_cmd(ctx):
-    embed = discord.Embed(title="MYİKKİ DOMON Help", color=0x82eefd)
+@bot.command(name="commands")
+async def commands_cmd(ctx):
+    embed = discord.Embed(title="MYİKKİ DOMON Commands", color=0x82eefd)
     embed.description = """
 **!start** : Start your DOMON adventure  
 **!daily** : Get your daily Domoballs (6/day) + 1 bonus item  
@@ -250,9 +250,9 @@ async def help_cmd(ctx):
 **!addballs <amount>** : (Admin) Add Domoballs  
 **!setspawn** : (Admin) Set current channel for DOMON spawns  
 **!forcespawn** : (Admin) Force a DOMON to appear  
-**PerfectDomoball** : Ultra-rare ball, instant-capture ANY DOMON!
     """
     await ctx.send(embed=embed)
+
 
 @bot.command(name="setspawn")
 async def set_spawn_channel(ctx):
