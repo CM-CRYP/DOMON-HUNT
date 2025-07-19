@@ -52,17 +52,14 @@ def init_drive():
         print("❌ No GOOGLE_DRIVE_CREDS found in environment.")
         return None
 
-    # Sauvegarder le contenu JSON dans un fichier temporaire
-    with open("tmp_creds.json", "w", encoding="utf-8") as f:
-        f.write(creds_data)
-
-    # Initialisation avec fichier temporaire
+    creds_dict = json.loads(creds_data)
     gauth = GoogleAuth()
-    gauth.LoadCredentialsFile("tmp_creds.json")
-
-    # Authentification sans paramètre (fichier déjà chargé)
+    gauth.settings['get_refresh_token'] = False
+    gauth.settings['client_config_backend'] = 'service'
+    gauth.settings['service_config'] = {
+        'client_json_dict': creds_dict
+    }
     gauth.ServiceAuth()
-
     return GoogleDrive(gauth)
 
 
