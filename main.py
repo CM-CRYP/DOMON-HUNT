@@ -56,14 +56,14 @@ def init_drive():
 
     gauth = GoogleAuth()
 
-    # ✅ Configuration correcte avec client_user_email dans settings
     gauth.settings = {
         'client_config_backend': 'service',
         'service_config': {
             'client_json_dict': creds_dict,
-            'client_user_email': creds_dict.get("client_email")  # ✅ nécessaire pour éviter l'erreur
+            'client_user_email': creds_dict.get("client_email")
         },
-        'get_refresh_token': False
+        'get_refresh_token': False,
+        'oauth_scope': ['https://www.googleapis.com/auth/drive']
     }
 
     gauth.ServiceAuth()
