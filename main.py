@@ -55,8 +55,8 @@ def init_drive():
     with open("tmp_creds.json", "w", encoding="utf-8") as f:
         f.write(creds_data)
     gauth = GoogleAuth()
-    # ======= LE BON CHARGEMENT POUR SERVICE ACCOUNT ========
-    gauth.ServiceAccountAuth("tmp_creds.json")
+    gauth.LoadServiceConfigFile("tmp_creds.json")
+    gauth.ServiceAuth()
     return GoogleDrive(gauth)
 
 
