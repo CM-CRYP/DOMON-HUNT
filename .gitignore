@@ -1,3 +1,4 @@
 .env
 players.json
 __pycache__/
+credentials.json
