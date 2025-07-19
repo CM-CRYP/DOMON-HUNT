@@ -2,15 +2,4 @@ discord.py==2.3.2
 python-dotenv==1.1.1
 flask==3.1.1
 pytz==2025.2
-
-# === Google Drive via PyDrive2 ===
-PyDrive2==1.19.0
-google-api-python-client==2.130.0
-google-auth==2.29.0
-google-auth-oauthlib==1.2.0
-oauth2client==4.1.3
-
-# ✅ Fixes definitifs pour PyDrive2 auth compatibilité
-pyOpenSSL==22.1.0
-cryptography==38.0.4
-dropbox
+dropbox==12.0.2
