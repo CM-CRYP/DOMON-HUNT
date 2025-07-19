@@ -51,15 +51,14 @@ def init_drive():
     if not creds_data:
         print("❌ No GOOGLE_DRIVE_CREDS found in environment.")
         return None
-    # Ecrit le secret dans un fichier temporaire
+    # Écrit le secret dans un fichier temporaire
     with open("tmp_creds.json", "w", encoding="utf-8") as f:
         f.write(creds_data)
     gauth = GoogleAuth()
-    gauth.LoadCredentialsFile("tmp_creds.json")
-    if not gauth.credentials:
-        gauth.LocalWebserverAuth()
-    gauth.SaveCredentialsFile("tmp_creds.json")
+    # ======= LE BON CHARGEMENT POUR SERVICE ACCOUNT ========
+    gauth.ServiceAccountAuth("tmp_creds.json")
     return GoogleDrive(gauth)
+
 
 drive = init_drive()
 
