@@ -51,29 +51,13 @@ def init_drive():
     if not creds_data:
         print("❌ No GOOGLE_DRIVE_CREDS found in environment.")
         return None
-
-    # 1. Sauvegarde le JSON temporaire
+    # On écrit le JSON dans un fichier temporaire
     with open("tmp_creds.json", "w", encoding="utf-8") as f:
         f.write(creds_data)
-
-    # 2. Écrit settings.yaml au BON format (c’est ça qui manquait !)
-    yaml_settings = """
-service_config:
-  client_service_account: tmp_creds.json
-save_credentials: False
-oauth_scope:
-  - https://www.googleapis.com/auth/drive
-    """
-    with open("settings.yaml", "w", encoding="utf-8") as f:
-        f.write(yaml_settings)
-
-    # 3. Auth
-    gauth = GoogleAuth(settings_file="settings.yaml")
-    gauth.ServiceAuth()
+    gauth = GoogleAuth()
+    # Le plus important : donner le chemin direct !
+    gauth.ServiceAuth(client_json_file_path="tmp_creds.json")
     return GoogleDrive(gauth)
-
-
-
 
 drive = init_drive()
 
