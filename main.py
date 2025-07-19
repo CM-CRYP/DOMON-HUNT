@@ -10,7 +10,7 @@ from flask import Flask
 from datetime import datetime
 import pytz
 
-# === Pour Dropbox ===
+# === Dropbox uniquement ===
 import dropbox
 
 DROPBOX_TOKEN = os.getenv("DROPBOX_TOKEN")
@@ -356,7 +356,6 @@ async def daily(ctx):
         return
     player["daily"] = str(now)
     player["inventory"]["Domoball"] = player["inventory"].get("Domoball", 0) + DAILY_REWARDS["Domoball"]
-    # Bonus: 1% chance for PerfectDomoball, sinon normal
     if random.randint(1, 100) == 1:
         bonus = "PerfectDomoball"
     else:
@@ -427,14 +426,11 @@ async def use_item(ctx, *, item_name: str):
     if not player:
         await ctx.send("Type !start to begin your hunt!")
         return
-
     inv = player["inventory"]
     normalized = item_name.strip().title().replace("Perfectdomoball", "PerfectDomoball")
-
     if normalized not in inv or inv[normalized] <= 0:
         await ctx.send(f"You don't have any **{normalized}**.")
         return
-
     if normalized == "Scan Tool":
         await ctx.send("Use !scan instead! The scan tool is always available for scanning DOMONs.")
     elif normalized == "Small Repair Kit":
@@ -455,7 +451,6 @@ async def use_item(ctx, *, item_name: str):
         await ctx.send("Use the PerfectDomoball directly during capture with !capture! It will always succeed.")
     else:
         await ctx.send("This item has no defined use yet.")
-
     inv[normalized] -= 1
     if inv[normalized] <= 0:
         del inv[normalized]
@@ -513,7 +508,6 @@ async def capture(ctx):
     if scan_claimed != user_id:
         await ctx.send("Only the **first** player who scanned this DOMON can try to capture it!")
         return
-    # --- Balles ---
     has_perfect = player["inventory"].get("PerfectDomoball", 0) > 0
     has_regular = player["inventory"].get("Domoball", 0) > 0
     if not has_perfect and not has_regular:
@@ -521,10 +515,8 @@ async def capture(ctx):
             f"{ctx.author.mention} you have no Domoballs or PerfectDomoball left! "
             "You lose the right to capture this DOMON. Someone else can now !scan and try!"
         )
-        scan_claimed = None  # Libère le droit pour le suivant !
+        scan_claimed = None
         return
-
-    # --- Animation Pokémon ---
     ball = "PerfectDomoball" if has_perfect else "Domoball"
     ball_emoji = "💎" if has_perfect else "🔵"
     shake_emojis = ["⬤", "⬤⬤", "⬤⬤⬤", "💥", "💫", "🌀", "✨"]
@@ -545,7 +537,6 @@ async def capture(ctx):
 
     await asyncio.sleep(1)
 
-    # Priorité PerfectDomoball (succès garanti)
     if has_perfect:
         player["inventory"]["PerfectDomoball"] -= 1
         if player["inventory"]["PerfectDomoball"] == 0:
@@ -566,7 +557,6 @@ async def capture(ctx):
         scan_claimed = None
         return
 
-    # Sinon capture classique
     rates = {"Common": 0.90, "Uncommon": 0.65, "Rare": 0.30, "Legendary": 0.10}
     success = random.random() < rates.get(spawned_domon["rarity"], 0.5)
     player["inventory"]["Domoball"] -= 1
@@ -613,7 +603,6 @@ async def forcespawn(ctx):
     if str(ctx.author.id) != authorized_id:
         await ctx.send("❌ Only the bot owner can use this command.")
         return
-
     global spawned_domon, active_spawn, scan_claimed
     if active_spawn:
         await ctx.send("⚠️ A DOMON is already spawned.")
