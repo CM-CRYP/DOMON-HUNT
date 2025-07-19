@@ -53,6 +53,11 @@ def init_drive():
         return None
 
     creds_dict = json.loads(creds_data)
+
+    # ✅ Ajout obligatoire pour PyDrive2 avec comptes de service
+    if "client_email" in creds_dict:
+        creds_dict["client_user_email"] = creds_dict["client_email"]
+
     gauth = GoogleAuth()
     gauth.settings['get_refresh_token'] = False
     gauth.settings['client_config_backend'] = 'service'
