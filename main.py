@@ -51,13 +51,20 @@ def init_drive():
     if not creds_data:
         print("❌ No GOOGLE_DRIVE_CREDS found in environment.")
         return None
-    # On écrit le JSON dans un fichier temporaire
+
+    # Sauvegarder le contenu JSON dans un fichier temporaire
     with open("tmp_creds.json", "w", encoding="utf-8") as f:
         f.write(creds_data)
+
+    # Initialisation avec fichier temporaire
     gauth = GoogleAuth()
-    # Le plus important : donner le chemin direct !
-    gauth.ServiceAuth(client_json_file_path="tmp_creds.json")
+    gauth.LoadCredentialsFile("tmp_creds.json")
+
+    # Authentification sans paramètre (fichier déjà chargé)
+    gauth.ServiceAuth()
+
     return GoogleDrive(gauth)
+
 
 drive = init_drive()
 
