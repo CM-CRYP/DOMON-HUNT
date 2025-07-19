@@ -2,3 +2,4 @@ discord.py==2.3.2
 python-dotenv
 flask
 pytz
+PyDrive2==1.19.0
