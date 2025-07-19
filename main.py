@@ -51,13 +51,27 @@ def init_drive():
     if not creds_data:
         print("❌ No GOOGLE_DRIVE_CREDS found in environment.")
         return None
-    # Écrit le secret dans un fichier temporaire
+
+    # 1. Écrit le fichier JSON temporaire
     with open("tmp_creds.json", "w", encoding="utf-8") as f:
         f.write(creds_data)
-    gauth = GoogleAuth()
-    gauth.LoadServiceConfigFile("tmp_creds.json")
+
+    # 2. Écrit le fichier settings.yaml temporaire
+    yaml_settings = """
+client_config_backend: service
+client_config_file: tmp_creds.json
+save_credentials: False
+oauth_scope:
+  - https://www.googleapis.com/auth/drive
+    """
+    with open("settings.yaml", "w", encoding="utf-8") as f:
+        f.write(yaml_settings)
+
+    # 3. Authentifie avec le Service Account (PyDrive2, Render-friendly)
+    gauth = GoogleAuth(settings_file="settings.yaml")
     gauth.ServiceAuth()
     return GoogleDrive(gauth)
+
 
 
 drive = init_drive()
