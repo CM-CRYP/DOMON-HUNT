@@ -277,6 +277,17 @@ def domon_intro_message(domon):
         "Legendary": intro_legendary
     }.get(rare, intro_common)
 
+# === TIMER pour scan ===
+scan_timer_task = None
+
+async def timeout_scan(ctx):
+    global scan_claimed, active_spawn, spawned_domon, scan_timer_task
+    await asyncio.sleep(120)  # 2 min
+    if active_spawn and scan_claimed is not None:
+        scan_claimed = None
+        await ctx.send("⏰ Temps écoulé ! Le DOMON n’a pas été capturé. Tout le monde peut refaire !scan.")
+    scan_timer_task = None
+
 @bot.event
 async def on_ready():
     print(f'Bot connecté comme {bot.user} !')
@@ -476,7 +487,7 @@ async def spawn_task():
 
 @bot.command(name="scan")
 async def scan(ctx):
-    global scan_claimed
+    global scan_claimed, scan_timer_task
     if not active_spawn or not spawned_domon:
         await ctx.send("No DOMON to scan right now.")
         return
@@ -491,12 +502,15 @@ async def scan(ctx):
         f"🔍 {ctx.author.mention} scanned the DOMON first!\n"
         f"DOMON: **{spawned_domon['name']}**\n"
         f"Type: {spawned_domon['type']} | Rarity: {spawned_domon['rarity']}\n_Description_: {spawned_domon['description']}\n"
-        "You are now the only one able to use !capture for this DOMON!"
+        "You are now the only one able to use !capture for this DOMON!\n"
+        "⏰ You have **2 minutes** to capture it, or the DOMON will escape and scanning will reset!"
     )
+    if scan_timer_task is None:
+        scan_timer_task = asyncio.create_task(timeout_scan(ctx))
 
 @bot.command(name="capture")
 async def capture(ctx):
-    global spawned_domon, active_spawn, scan_claimed
+    global spawned_domon, active_spawn, scan_claimed, scan_timer_task
     user_id = str(ctx.author.id)
     player = players.get(user_id)
     if not active_spawn or not spawned_domon:
@@ -516,6 +530,9 @@ async def capture(ctx):
             "You lose the right to capture this DOMON. Someone else can now !scan and try!"
         )
         scan_claimed = None
+        if scan_timer_task:
+            scan_timer_task.cancel()
+            scan_timer_task = None
         return
     ball = "PerfectDomoball" if has_perfect else "Domoball"
     ball_emoji = "💎" if has_perfect else "🔵"
@@ -555,6 +572,9 @@ async def capture(ctx):
         active_spawn = False
         spawned_domon = None
         scan_claimed = None
+        if scan_timer_task:
+            scan_timer_task.cancel()
+            scan_timer_task = None
         return
 
     rates = {"Common": 0.90, "Uncommon": 0.65, "Rare": 0.30, "Legendary": 0.10}
@@ -596,6 +616,11 @@ async def capture(ctx):
         active_spawn = False
         spawned_domon = None
         scan_claimed = None
+
+    # ANNULATION DU TIMER après capture (succès ou échec)
+    if scan_timer_task:
+        scan_timer_task.cancel()
+        scan_timer_task = None
 
 @bot.command(name="forcespawn")
 async def forcespawn(ctx):
