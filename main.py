@@ -84,10 +84,14 @@ def upload_players():
     if not drive:
         print("❌ Google Drive not available.")
         return
+    folder_id = os.getenv("GOOGLE_DRIVE_FOLDER_ID")  # Ajout pour dossier partagé
+    file_metadata = {'title': DRIVE_FILE_NAME}
+    if folder_id:
+        file_metadata['parents'] = [{'id': folder_id}]
     if DRIVE_FILE_ID:
         file = drive.CreateFile({'id': DRIVE_FILE_ID})
     else:
-        file = drive.CreateFile({'title': DRIVE_FILE_NAME})
+        file = drive.CreateFile(file_metadata)
     file.SetContentFile(SAVE_FILE)
     file.Upload()
     DRIVE_FILE_ID = file['id']
