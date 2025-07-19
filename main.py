@@ -10,6 +10,10 @@ from flask import Flask
 from datetime import datetime
 import pytz
 
+# === Pour Google Drive ===
+from pydrive2.auth import GoogleAuth
+from pydrive2.drive import GoogleDrive
+
 # === Keep-alive Flask server ===
 app = Flask('')
 
@@ -36,9 +40,58 @@ intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# === Base de données JSON ===
+# === Base de données JSON & Google Drive ===
 SAVE_FILE = "players.json"
 CONFIG_FILE = "config.json"
+DRIVE_FILE_NAME = "players.json"
+DRIVE_FILE_ID = None
+
+def init_drive():
+    creds_data = os.getenv("GOOGLE_DRIVE_CREDS")
+    if not creds_data:
+        print("❌ No GOOGLE_DRIVE_CREDS found in environment.")
+        return None
+    # Ecrit le secret dans un fichier temporaire
+    with open("tmp_creds.json", "w", encoding="utf-8") as f:
+        f.write(creds_data)
+    gauth = GoogleAuth()
+    gauth.LoadCredentialsFile("tmp_creds.json")
+    if not gauth.credentials:
+        gauth.LocalWebserverAuth()
+    gauth.SaveCredentialsFile("tmp_creds.json")
+    return GoogleDrive(gauth)
+
+drive = init_drive()
+
+def download_players():
+    global DRIVE_FILE_ID
+    if not drive:
+        print("❌ Google Drive not available.")
+        return
+    file_list = drive.ListFile({'q': f"title='{DRIVE_FILE_NAME}' and trashed=false"}).GetList()
+    if file_list:
+        file = file_list[0]
+        DRIVE_FILE_ID = file['id']
+        content = file.GetContentString()
+        with open(SAVE_FILE, "w", encoding="utf-8") as f:
+            f.write(content)
+        print("✅ players.json downloaded from Google Drive.")
+    else:
+        print("🆕 No players.json found on Drive. Will create new one on first save.")
+
+def upload_players():
+    global DRIVE_FILE_ID
+    if not drive:
+        print("❌ Google Drive not available.")
+        return
+    if DRIVE_FILE_ID:
+        file = drive.CreateFile({'id': DRIVE_FILE_ID})
+    else:
+        file = drive.CreateFile({'title': DRIVE_FILE_NAME})
+    file.SetContentFile(SAVE_FILE)
+    file.Upload()
+    DRIVE_FILE_ID = file['id']
+    print("☁️ players.json uploaded to Google Drive.")
 
 def load_players():
     if os.path.exists(SAVE_FILE):
@@ -49,6 +102,7 @@ def load_players():
 def save_players(players):
     with open(SAVE_FILE, "w", encoding="utf-8") as f:
         json.dump(players, f, ensure_ascii=False, indent=2)
+    upload_players()
 
 def load_config():
     if os.path.exists(CONFIG_FILE):
@@ -60,6 +114,8 @@ def save_config(config):
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(config, f, ensure_ascii=False, indent=2)
 
+# Au tout début, on charge la dernière sauvegarde de Drive (si dispo)
+download_players()
 players = load_players()
 config = load_config()
 spawned_domon = None
@@ -225,9 +281,27 @@ RARITY_PROBA = {"Common": 55, "Uncommon": 24, "Rare": 14, "Legendary": 7}
 STARTER_PACK = {"Domoball": 5, "Scan Tool": 1, "PerfectDomoball": 0}
 DAILY_REWARDS = {
     "Domoball": 6,
-    # 1% chance d'obtenir une PerfectDomoball (très rare !)
     "bonus_items": ["Scan Tool", "Small Repair Kit", "CryptoStamp", "Architectrap", "SpectraSeal", "BIMNet", "PerfectDomoball"]
 }
+
+# === MESSAGES SPÉCIAUX INTRO SELON RARETÉ ===
+def domon_intro_message(domon):
+    rare = domon['rarity']
+    name = domon['name']
+    intro_common = f"A wild DOMON appeared!\n**#{domon['num']:03d} {name}**"
+    intro_uncommon = f"⚡ An uncommon DOMON has emerged!\n**#{domon['num']:03d} {name}**"
+    intro_rare = f"✨ A rare DOMON materializes before you!\n**#{domon['num']:03d} {name}**"
+    intro_legendary = (
+        f"🌟🌟🌟 LEGENDARY ALERT! 🌟🌟🌟\n"
+        f"🔥 A **LEGENDARY DOMON** has appeared!\n"
+        f"**#{domon['num']:03d} {name}**"
+    )
+    return {
+        "Common": intro_common,
+        "Uncommon": intro_uncommon,
+        "Rare": intro_rare,
+        "Legendary": intro_legendary
+    }.get(rare, intro_common)
 
 @bot.event
 async def on_ready():
@@ -252,7 +326,6 @@ async def commands_cmd(ctx):
 **!forcespawn** : (Admin) Force a DOMON to appear  
     """
     await ctx.send(embed=embed)
-
 
 @bot.command(name="setspawn")
 async def set_spawn_channel(ctx):
@@ -291,9 +364,9 @@ async def start_game(ctx):
             "evolutions": {},
         }
         save_players(players)
-        await ctx.send(f"{ctx.author.mention} Welcome to MYİKKİ DOMON HUNT!\nYou receive: 5 Domoballs and 1 Scan Tool! Type `!inventory` to see your items.")
+        await ctx.send(f"{ctx.author.mention} Welcome to MYİKKİ DOMON HUNT!\nYou receive: 5 Domoballs and 1 Scan Tool! Type !inventory to see your items.")
     else:
-        await ctx.send("You already have an account! Use `!inventory`.")
+        await ctx.send("You already have an account! Use !inventory.")
 
 @bot.command(name="daily")
 async def daily(ctx):
@@ -302,7 +375,7 @@ async def daily(ctx):
     user_id = str(ctx.author.id)
     player = players.get(user_id)
     if not player:
-        await ctx.send("Type `!start` to begin your hunt!")
+        await ctx.send("Type !start to begin your hunt!")
         return
     if player["daily"] == str(now):
         await ctx.send("You already claimed your daily reward today!")
@@ -326,7 +399,7 @@ async def inventory(ctx):
     user_id = str(ctx.author.id)
     player = players.get(user_id)
     if not player:
-        await ctx.send("Type `!start` to begin your hunt!")
+        await ctx.send("Type !start to begin your hunt!")
         return
     embed = discord.Embed(title=f"{ctx.author.display_name}'s Inventory", color=0xFFD700)
     for k, v in player["inventory"].items():
@@ -338,7 +411,7 @@ async def collection(ctx):
     user_id = str(ctx.author.id)
     player = players.get(user_id)
     if not player:
-        await ctx.send("Type `!start` to begin your hunt!")
+        await ctx.send("Type !start to begin your hunt!")
         return
     if not player["collection"]:
         await ctx.send("You haven't captured any DOMON yet!")
@@ -378,7 +451,7 @@ async def use_item(ctx, *, item_name: str):
     user_id = str(ctx.author.id)
     player = players.get(user_id)
     if not player:
-        await ctx.send("Type `!start` to begin your hunt!")
+        await ctx.send("Type !start to begin your hunt!")
         return
 
     inv = player["inventory"]
@@ -389,7 +462,7 @@ async def use_item(ctx, *, item_name: str):
         return
 
     if normalized == "Scan Tool":
-        await ctx.send("Use `!scan` instead! The scan tool is always available for scanning DOMONs.")
+        await ctx.send("Use !scan instead! The scan tool is always available for scanning DOMONs.")
     elif normalized == "Small Repair Kit":
         player["xp"] += 1
         await ctx.send(f"🔧 {ctx.author.mention} used a **Small Repair Kit** and gained +1 XP!")
@@ -405,7 +478,7 @@ async def use_item(ctx, *, item_name: str):
     elif normalized == "BIMNet":
         await ctx.send(f"🕸️ {ctx.author.mention} used a **BIMNet**! DOMON spawn rate doubled for 30 min. (Effect simulation)")
     elif normalized == "PerfectDomoball":
-        await ctx.send("Use the PerfectDomoball directly during capture with `!capture`! It will always succeed.")
+        await ctx.send("Use the PerfectDomoball directly during capture with !capture! It will always succeed.")
     else:
         await ctx.send("This item has no defined use yet.")
 
@@ -425,10 +498,11 @@ async def spawn_task():
     scan_claimed = None
     channel = bot.get_channel(config["spawn_channel_id"])
     if channel:
+        intro_msg = domon_intro_message(domon)
         await channel.send(
-            f"A wild DOMON appeared!\n**#{domon['num']:03d} {domon['name']}**\n"
+            f"{intro_msg}\n"
             f"Type: {domon['type']} | Rarity: {domon['rarity']}\n_Description_: {domon['description']}\n"
-            "Type `!scan` to be the first to scan and unlock the right to capture it!"
+            "Type !scan to be the first to scan and unlock the right to capture it!"
         )
 
 @bot.command(name="scan")
@@ -441,14 +515,14 @@ async def scan(ctx):
         await ctx.send("Someone already scanned this DOMON! Only the first scanner can attempt capture.")
         return
     if str(ctx.author.id) not in players:
-        await ctx.send("Type `!start` to begin your hunt!")
+        await ctx.send("Type !start to begin your hunt!")
         return
     scan_claimed = str(ctx.author.id)
     await ctx.send(
         f"🔍 {ctx.author.mention} scanned the DOMON first!\n"
         f"DOMON: **{spawned_domon['name']}**\n"
         f"Type: {spawned_domon['type']} | Rarity: {spawned_domon['rarity']}\n_Description_: {spawned_domon['description']}\n"
-        "You are now the only one able to use `!capture` for this DOMON!"
+        "You are now the only one able to use !capture for this DOMON!"
     )
 
 @bot.command(name="capture")
@@ -460,7 +534,7 @@ async def capture(ctx):
         await ctx.send("No DOMON to capture.")
         return
     if not player:
-        await ctx.send("Type `!start` to begin your hunt!")
+        await ctx.send("Type !start to begin your hunt!")
         return
     if scan_claimed != user_id:
         await ctx.send("Only the **first** player who scanned this DOMON can try to capture it!")
@@ -471,12 +545,34 @@ async def capture(ctx):
     if not has_perfect and not has_regular:
         await ctx.send(
             f"{ctx.author.mention} you have no Domoballs or PerfectDomoball left! "
-            "You lose the right to capture this DOMON. Someone else can now `!scan` and try!"
+            "You lose the right to capture this DOMON. Someone else can now !scan and try!"
         )
         scan_claimed = None  # Libère le droit pour le suivant !
         return
 
-    # Priorité PerfectDomoball
+    # --- Animation Pokémon ---
+    ball = "PerfectDomoball" if has_perfect else "Domoball"
+    ball_emoji = "💎" if has_perfect else "🔵"
+    shake_emojis = ["⬤", "⬤⬤", "⬤⬤⬤", "💥", "💫", "🌀", "✨"]
+    suspense_msgs = [
+        "The ball shakes...",
+        "The DOMON resists...",
+        "It's struggling!",
+        "It's almost there...",
+        "Hold on...",
+    ]
+    # Message d'intro animée
+    anim_msg = await ctx.send(f"{ctx.author.mention} throws a {ball_emoji} **{ball}** at **{spawned_domon['name']}**!")
+    shake_count = 4 if spawned_domon['rarity'] == "Legendary" else random.randint(2, 3)
+    for i in range(shake_count):
+        await asyncio.sleep(1.1)
+        suspense_line = random.choice(suspense_msgs)
+        effect = random.choice(shake_emojis)
+        await anim_msg.edit(content=anim_msg.content + f"\n{effect} {suspense_line}")
+
+    await asyncio.sleep(1)
+
+    # Priorité PerfectDomoball (succès garanti)
     if has_perfect:
         player["inventory"]["PerfectDomoball"] -= 1
         if player["inventory"]["PerfectDomoball"] == 0:
@@ -484,44 +580,59 @@ async def capture(ctx):
         player["collection"].append(spawned_domon)
         player["xp"] += 2
         save_players(players)
-        msg = f"💎 {ctx.author.mention} used a **PerfectDomoball** and INSTANTLY captured **{spawned_domon['name']}**! +2 XP!"
+        msg = (
+            f"\n✨✨ **CRITICAL SUCCESS!** The DOMON can't resist!\n"
+            f"{ctx.author.mention} used a **PerfectDomoball** and INSTANTLY captured **{spawned_domon['name']}**! +2 XP!"
+        )
         evolution_msg = check_evolution(user_id)
         if evolution_msg:
             msg += f"\n{evolution_msg}"
-        await ctx.send(msg)
+        await anim_msg.edit(content=anim_msg.content + msg)
         active_spawn = False
         spawned_domon = None
         scan_claimed = None
         return
 
     # Sinon capture classique
-    if has_regular:
-        rates = {"Common": 0.90, "Uncommon": 0.65, "Rare": 0.30, "Legendary": 0.10}
-        success = random.random() < rates.get(spawned_domon["rarity"], 0.5)
-        player["inventory"]["Domoball"] -= 1
-        if player["inventory"]["Domoball"] == 0:
-            del player["inventory"]["Domoball"]
-        if success:
-            player["collection"].append(spawned_domon)
-            player["xp"] += 1
-            save_players(players)
-            msg = f"🎉 {ctx.author.mention} captured **{spawned_domon['name']}**! Added to your collection. +1 XP."
-            evolution_msg = check_evolution(user_id)
-            if evolution_msg:
-                msg += f"\n{evolution_msg}"
-            if player["xp"] % 10 == 0:
-                item = random.choice([i for i in DAILY_REWARDS["bonus_items"] if i != "PerfectDomoball"])
-                player["inventory"][item] = player["inventory"].get(item, 0) + 1
-                msg += f"\nYou reached {player['xp']} XP and received a bonus item: **{item}**!"
-            await ctx.send(msg)
-            active_spawn = False
-            spawned_domon = None
-            scan_claimed = None
-        else:
-            active_spawn = False
-            spawned_domon = None
-            scan_claimed = None
-            await ctx.send(f"❌ {ctx.author.mention} failed to capture the DOMON... It escaped!")
+    rates = {"Common": 0.90, "Uncommon": 0.65, "Rare": 0.30, "Legendary": 0.10}
+    success = random.random() < rates.get(spawned_domon["rarity"], 0.5)
+    player["inventory"]["Domoball"] -= 1
+    if player["inventory"]["Domoball"] == 0:
+        del player["inventory"]["Domoball"]
+
+    if success:
+        result_msg = random.choice([
+            "✨ Click! The DOMON was caught!",
+            "🎉 The ball stops moving... Success!",
+            "You did it! The DOMON is yours!",
+            "✨ The DOMON has been captured!"
+        ])
+        player["collection"].append(spawned_domon)
+        player["xp"] += 1
+        save_players(players)
+        msg = f"\n{result_msg} {ctx.author.mention} captured **{spawned_domon['name']}**! Added to your collection. +1 XP."
+        evolution_msg = check_evolution(user_id)
+        if evolution_msg:
+            msg += f"\n{evolution_msg}"
+        if player["xp"] % 10 == 0:
+            item = random.choice([i for i in DAILY_REWARDS["bonus_items"] if i != "PerfectDomoball"])
+            player["inventory"][item] = player["inventory"].get(item, 0) + 1
+            msg += f"\nYou reached {player['xp']} XP and received a bonus item: **{item}**!"
+        await anim_msg.edit(content=anim_msg.content + msg)
+        active_spawn = False
+        spawned_domon = None
+        scan_claimed = None
+    else:
+        fail_msgs = [
+            "❌ Oh no! The DOMON broke free!",
+            "The ball opened... The DOMON escaped!",
+            "So close... but it’s gone!",
+            "❌ The DOMON got away!"
+        ]
+        await anim_msg.edit(content=anim_msg.content + f"\n{random.choice(fail_msgs)}")
+        active_spawn = False
+        spawned_domon = None
+        scan_claimed = None
 
 @bot.command(name="forcespawn")
 async def forcespawn(ctx):
@@ -538,10 +649,11 @@ async def forcespawn(ctx):
     spawned_domon = domon
     active_spawn = True
     scan_claimed = None
+    intro_msg = domon_intro_message(domon)
     await ctx.send(
-        f"**(Admin)** A wild DOMON appeared!\n**#{domon['num']:03d} {domon['name']}**\n"
+        f"**(Admin)** {intro_msg}\n"
         f"Type: {domon['type']} | Rarity: {domon['rarity']}\n_Description_: {domon['description']}\n"
-        "Type `!scan` to be the first to scan and unlock the right to capture it!"
+        "Type !scan to be the first to scan and unlock the right to capture it!"
     )
 
 def check_evolution(user_id):
