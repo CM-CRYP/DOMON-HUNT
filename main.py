@@ -9,9 +9,9 @@ from threading import Thread
 from flask import Flask
 from datetime import datetime
 import pytz
-
 import dropbox
 
+# --- Dropbox config ---
 DROPBOX_TOKEN = os.getenv("DROPBOX_TOKEN")
 DROPBOX_PATH = "/players.json"
 
@@ -37,7 +37,7 @@ def download_players_dropbox():
     except dropbox.exceptions.ApiError:
         print("🆕 No players.json found on Dropbox. Will create new one on first save.")
 
-# === Keep-alive Flask server ===
+# --- Keep-alive Flask server for Render ---
 app = Flask('')
 
 @app.route('/')
@@ -51,6 +51,7 @@ def keep_alive():
     t = Thread(target=run)
     t.start()
 
+# --- Discord & Global State ---
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
@@ -64,6 +65,11 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 SAVE_FILE = "players.json"
 CONFIG_FILE = "config.json"
+players = None
+config = None
+
+# --- Async lock for scan/capture concurrency ---
+scan_lock = asyncio.Lock()
 
 def load_players():
     if os.path.exists(SAVE_FILE):
@@ -86,13 +92,17 @@ def save_config(config):
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(config, f, ensure_ascii=False, indent=2)
 
+print("Downloading player data from Dropbox (startup)...")
 download_players_dropbox()
 players = load_players()
 config = load_config()
+print("Player and config data loaded.")
+
 spawned_domon = None
 active_spawn = False
 scan_claimed = None
-capture_attempted = None  # <--- PATCH : bloquer spam capture
+capture_attempted = None
+scan_timer_task = None
 
 # ------- Liste des 151 DOMON (évolutions incluses) -------
 DOMON_LIST = [
@@ -249,6 +259,7 @@ DOMON_LIST = [
     {"num": 151, "name": "MYİKKİMONE", "type": "Climat", "rarity": "Legendary", "evolution": None, "description": "Legendary spirit, protects homes forever."}
 ]
 
+# --- Other constants ---
 RARITY_PROBA = {"Common": 55, "Uncommon": 24, "Rare": 14, "Legendary": 7}
 STARTER_PACK = {"Domoball": 5, "Scan Tool": 1, "PerfectDomoball": 0}
 DAILY_REWARDS = {
@@ -274,24 +285,37 @@ def domon_intro_message(domon):
         "Legendary": intro_legendary
     }.get(rare, intro_common)
 
-scan_timer_task = None
+# --- Patch: Loading protection ---
+bot_ready = False
 
+@bot.event
+async def on_ready():
+    global bot_ready
+    print(f"Bot ready as {bot.user}!")
+    await asyncio.sleep(2)  # Give extra time for Dropbox to load
+    bot_ready = True
+    spawn_task.start()
+
+def not_ready(ctx):
+    return not bot_ready or players is None or config is None
+
+# --- Patch: Timeout scan in English ---
 async def timeout_scan(ctx):
     global scan_claimed, active_spawn, spawned_domon, scan_timer_task, capture_attempted
     await asyncio.sleep(120)
     if active_spawn and scan_claimed is not None:
         scan_claimed = None
         capture_attempted = None
-        await ctx.send("⏰ Temps écoulé ! Le DOMON n’a pas été capturé. Tout le monde peut refaire !scan.")
+        await ctx.send("⏰ Time's up! The DOMON was not captured. Anyone can !scan again.")
     scan_timer_task = None
 
-@bot.event
-async def on_ready():
-    print(f'Bot connecté comme {bot.user} !')
-    spawn_task.start()
+# --- Commands ---
 
 @bot.command(name="commands")
 async def commands_cmd(ctx):
+    if not_ready(ctx):
+        await ctx.send("Bot is still initializing. Try again in a few seconds!")
+        return
     embed = discord.Embed(title="MYİKKİ DOMON Commands", color=0x82eefd)
     embed.description = """
 **!start** : Start your DOMON adventure  
@@ -311,6 +335,9 @@ async def commands_cmd(ctx):
 
 @bot.command(name="setspawn")
 async def set_spawn_channel(ctx):
+    if not_ready(ctx):
+        await ctx.send("Bot is still initializing. Try again in a few seconds!")
+        return
     authorized_id = "865185894197887018"
     if str(ctx.author.id) != authorized_id:
         await ctx.send("❌ Only the bot owner can use this command.")
@@ -321,6 +348,9 @@ async def set_spawn_channel(ctx):
 
 @bot.command(name="addballs")
 async def addballs(ctx, amount: int):
+    if not_ready(ctx):
+        await ctx.send("Bot is still initializing. Try again in a few seconds!")
+        return
     authorized_id = "865185894197887018"
     if str(ctx.author.id) != authorized_id:
         await ctx.send("❌ Only the bot owner can use this command.")
@@ -335,6 +365,9 @@ async def addballs(ctx, amount: int):
 
 @bot.command(name="start")
 async def start_game(ctx):
+    if not_ready(ctx):
+        await ctx.send("Bot is still initializing. Try again in a few seconds!")
+        return
     user_id = str(ctx.author.id)
     if user_id not in players:
         players[user_id] = {
@@ -352,6 +385,10 @@ async def start_game(ctx):
 
 @bot.command(name="daily")
 async def daily(ctx):
+    if not_ready(ctx):
+        await ctx.send("Bot is still initializing. Try again in a few seconds!")
+        return
+    print(f"!daily called by {ctx.author} ({ctx.author.id})")
     tz = pytz.timezone("Europe/Paris")
     now = datetime.now(tz).date()
     user_id = str(ctx.author.id)
@@ -377,6 +414,9 @@ async def daily(ctx):
 
 @bot.command(name="inventory")
 async def inventory(ctx):
+    if not_ready(ctx):
+        await ctx.send("Bot is still initializing. Try again in a few seconds!")
+        return
     user_id = str(ctx.author.id)
     player = players.get(user_id)
     if not player:
@@ -389,6 +429,9 @@ async def inventory(ctx):
 
 @bot.command(name="collection")
 async def collection(ctx):
+    if not_ready(ctx):
+        await ctx.send("Bot is still initializing. Try again in a few seconds!")
+        return
     user_id = str(ctx.author.id)
     player = players.get(user_id)
     if not player:
@@ -406,6 +449,9 @@ async def collection(ctx):
 
 @bot.command(name="domodex")
 async def domodex(ctx):
+    if not_ready(ctx):
+        await ctx.send("Bot is still initializing. Try again in a few seconds!")
+        return
     embed = discord.Embed(title="DOMODEX – Complete List", color=0x6e34ff)
     domotxt = ""
     for d in DOMON_LIST:
@@ -415,6 +461,9 @@ async def domodex(ctx):
 
 @bot.command(name="info")
 async def domon_info(ctx, *, name_or_num: str):
+    if not_ready(ctx):
+        await ctx.send("Bot is still initializing. Try again in a few seconds!")
+        return
     domon = next((d for d in DOMON_LIST if d["name"].lower() == name_or_num.lower() or str(d["num"]) == name_or_num), None)
     if not domon:
         await ctx.send("Unknown DOMON.")
@@ -429,6 +478,9 @@ async def domon_info(ctx, *, name_or_num: str):
 
 @bot.command(name="use")
 async def use_item(ctx, *, item_name: str):
+    if not_ready(ctx):
+        await ctx.send("Bot is still initializing. Try again in a few seconds!")
+        return
     user_id = str(ctx.author.id)
     player = players.get(user_id)
     if not player:
@@ -467,7 +519,7 @@ async def use_item(ctx, *, item_name: str):
 @tasks.loop(minutes=15)
 async def spawn_task():
     global spawned_domon, active_spawn, scan_claimed, capture_attempted
-    if active_spawn or not config.get("spawn_channel_id"):
+    if not bot_ready or active_spawn or not config.get("spawn_channel_id"):
         return
     domon = random.choices(DOMON_LIST, weights=[RARITY_PROBA.get(d["rarity"], 10) for d in DOMON_LIST], k=1)[0]
     spawned_domon = domon
@@ -485,155 +537,168 @@ async def spawn_task():
 
 @bot.command(name="scan")
 async def scan(ctx):
+    if not_ready(ctx):
+        await ctx.send("Bot is still initializing. Try again in a few seconds!")
+        return
+    print(f"!scan called by {ctx.author} ({ctx.author.id})")
     global scan_claimed, scan_timer_task, capture_attempted
-    if not active_spawn or not spawned_domon:
-        await ctx.send("No DOMON to scan right now.")
-        return
-    if scan_claimed:
-        await ctx.send("Someone already scanned this DOMON! Only the first scanner can attempt capture.")
-        return
-    if str(ctx.author.id) not in players:
-        await ctx.send("Type !start to begin your hunt!")
-        return
-    scan_claimed = str(ctx.author.id)
-    capture_attempted = None  # Reset à chaque scan
-    await ctx.send(
-        f"🔍 {ctx.author.mention} scanned the DOMON first!\n"
-        f"DOMON: **{spawned_domon['name']}**\n"
-        f"Type: {spawned_domon['type']} | Rarity: {spawned_domon['rarity']}\n_Description_: {spawned_domon['description']}\n"
-        "You are now the only one able to use !capture for this DOMON!\n"
-        "⏰ You have **2 minutes** to capture it, or the DOMON will escape and scanning will reset!"
-    )
-    if scan_timer_task is None:
-        scan_timer_task = asyncio.create_task(timeout_scan(ctx))
+    async with scan_lock:
+        if not active_spawn or not spawned_domon:
+            await ctx.send("No DOMON to scan right now.")
+            return
+        if scan_claimed:
+            await ctx.send("Someone already scanned this DOMON! Only the first scanner can attempt capture.")
+            return
+        if str(ctx.author.id) not in players:
+            await ctx.send("Type !start to begin your hunt!")
+            return
+        scan_claimed = str(ctx.author.id)
+        capture_attempted = None  # Reset every scan
+        await ctx.send(
+            f"🔍 {ctx.author.mention} scanned the DOMON first!\n"
+            f"DOMON: **{spawned_domon['name']}**\n"
+            f"Type: {spawned_domon['type']} | Rarity: {spawned_domon['rarity']}\n_Description_: {spawned_domon['description']}\n"
+            "You are now the only one able to use !capture for this DOMON!\n"
+            "⏰ You have **2 minutes** to capture it, or the DOMON will escape and scanning will reset!"
+        )
+        if scan_timer_task is None:
+            scan_timer_task = asyncio.create_task(timeout_scan(ctx))
 
 @bot.command(name="capture")
 async def capture(ctx):
+    if not_ready(ctx):
+        await ctx.send("Bot is still initializing. Try again in a few seconds!")
+        return
+    print(f"!capture called by {ctx.author} ({ctx.author.id})")
     global spawned_domon, active_spawn, scan_claimed, scan_timer_task, capture_attempted
-    user_id = str(ctx.author.id)
-    player = players.get(user_id)
-    if not active_spawn or not spawned_domon:
-        await ctx.send("No DOMON to capture.")
-        return
-    if not player:
-        await ctx.send("Type !start to begin your hunt!")
-        return
-    if scan_claimed != user_id:
-        await ctx.send("Only the **first** player who scanned this DOMON can try to capture it!")
-        return
-    if capture_attempted == user_id:
-        await ctx.send("You have already tried to capture this DOMON. Wait for another scan!")
-        return
-    if capture_attempted is not None:
-        await ctx.send("A capture attempt has already been made for this DOMON. Wait for the next scan!")
-        return
-    capture_attempted = user_id
+    async with scan_lock:
+        user_id = str(ctx.author.id)
+        player = players.get(user_id)
+        if not active_spawn or not spawned_domon:
+            await ctx.send("No DOMON to capture.")
+            return
+        if not player:
+            await ctx.send("Type !start to begin your hunt!")
+            return
+        if scan_claimed != user_id:
+            await ctx.send("Only the **first** player who scanned this DOMON can try to capture it!")
+            return
+        if capture_attempted == user_id:
+            await ctx.send("You have already tried to capture this DOMON. Wait for another scan!")
+            return
+        if capture_attempted is not None:
+            await ctx.send("A capture attempt has already been made for this DOMON. Wait for the next scan!")
+            return
+        capture_attempted = user_id
 
-    has_perfect = player["inventory"].get("PerfectDomoball", 0) > 0
-    has_regular = player["inventory"].get("Domoball", 0) > 0
-    if not has_perfect and not has_regular:
-        await ctx.send(
-            f"{ctx.author.mention} you have no Domoballs or PerfectDomoball left! "
-            "You lose the right to capture this DOMON. Someone else can now !scan and try!"
-        )
-        scan_claimed = None
-        capture_attempted = None
-        if scan_timer_task:
-            scan_timer_task.cancel()
-            scan_timer_task = None
-        return
-    ball = "PerfectDomoball" if has_perfect else "Domoball"
-    ball_emoji = "💎" if has_perfect else "🔵"
-    shake_emojis = ["⬤", "⬤⬤", "⬤⬤⬤", "💥", "💫", "🌀", "✨"]
-    suspense_msgs = [
-        "The ball shakes...",
-        "The DOMON resists...",
-        "It's struggling!",
-        "It's almost there...",
-        "Hold on...",
-    ]
-    anim_msg = await ctx.send(f"{ctx.author.mention} throws a {ball_emoji} **{ball}** at **{spawned_domon['name']}**!")
-    shake_count = 4 if spawned_domon['rarity'] == "Legendary" else random.randint(2, 3)
-    for i in range(shake_count):
-        await asyncio.sleep(1.1)
-        suspense_line = random.choice(suspense_msgs)
-        effect = random.choice(shake_emojis)
-        await anim_msg.edit(content=anim_msg.content + f"\n{effect} {suspense_line}")
-
-    await asyncio.sleep(1)
-
-    if has_perfect:
-        player["inventory"]["PerfectDomoball"] -= 1
-        if player["inventory"]["PerfectDomoball"] == 0:
-            del player["inventory"]["PerfectDomoball"]
-        player["collection"].append(spawned_domon)
-        player["xp"] += 2
-        save_players(players)
-        msg = (
-            f"\n✨✨ **CRITICAL SUCCESS!** The DOMON can't resist!\n"
-            f"{ctx.author.mention} used a **PerfectDomoball** and INSTANTLY captured **{spawned_domon['name']}**! +2 XP!"
-        )
-        evolution_msg = check_evolution(user_id)
-        if evolution_msg:
-            msg += f"\n{evolution_msg}"
-        await anim_msg.edit(content=anim_msg.content + msg)
-        active_spawn = False
-        spawned_domon = None
-        scan_claimed = None
-        capture_attempted = None
-        if scan_timer_task:
-            scan_timer_task.cancel()
-            scan_timer_task = None
-        return
-
-    rates = {"Common": 0.90, "Uncommon": 0.65, "Rare": 0.30, "Legendary": 0.10}
-    success = random.random() < rates.get(spawned_domon["rarity"], 0.5)
-    player["inventory"]["Domoball"] -= 1
-    if player["inventory"]["Domoball"] == 0:
-        del player["inventory"]["Domoball"]
-
-    if success:
-        result_msg = random.choice([
-            "✨ Click! The DOMON was caught!",
-            "🎉 The ball stops moving... Success!",
-            "You did it! The DOMON is yours!",
-            "✨ The DOMON has been captured!"
-        ])
-        player["collection"].append(spawned_domon)
-        player["xp"] += 1
-        save_players(players)
-        msg = f"\n{result_msg} {ctx.author.mention} captured **{spawned_domon['name']}**! Added to your collection. +1 XP."
-        evolution_msg = check_evolution(user_id)
-        if evolution_msg:
-            msg += f"\n{evolution_msg}"
-        if player["xp"] % 10 == 0:
-            item = random.choice([i for i in DAILY_REWARDS["bonus_items"] if i != "PerfectDomoball"])
-            player["inventory"][item] = player["inventory"].get(item, 0) + 1
-            msg += f"\nYou reached {player['xp']} XP and received a bonus item: **{item}**!"
-        await anim_msg.edit(content=anim_msg.content + msg)
-        active_spawn = False
-        spawned_domon = None
-        scan_claimed = None
-        capture_attempted = None
-    else:
-        fail_msgs = [
-            "❌ Oh no! The DOMON broke free!",
-            "The ball opened... The DOMON escaped!",
-            "So close... but it’s gone!",
-            "❌ The DOMON got away!"
+        has_perfect = player["inventory"].get("PerfectDomoball", 0) > 0
+        has_regular = player["inventory"].get("Domoball", 0) > 0
+        if not has_perfect and not has_regular:
+            await ctx.send(
+                f"{ctx.author.mention} you have no Domoballs or PerfectDomoball left! "
+                "You lose the right to capture this DOMON. Someone else can now !scan and try!"
+            )
+            scan_claimed = None
+            capture_attempted = None
+            if scan_timer_task:
+                scan_timer_task.cancel()
+                scan_timer_task = None
+            return
+        ball = "PerfectDomoball" if has_perfect else "Domoball"
+        ball_emoji = "💎" if has_perfect else "🔵"
+        shake_emojis = ["⬤", "⬤⬤", "⬤⬤⬤", "💥", "💫", "🌀", "✨"]
+        suspense_msgs = [
+            "The ball shakes...",
+            "The DOMON resists...",
+            "It's struggling!",
+            "It's almost there...",
+            "Hold on...",
         ]
-        await anim_msg.edit(content=anim_msg.content + f"\n{random.choice(fail_msgs)}")
-        active_spawn = False
-        spawned_domon = None
-        scan_claimed = None
-        capture_attempted = None
+        anim_msg = await ctx.send(f"{ctx.author.mention} throws a {ball_emoji} **{ball}** at **{spawned_domon['name']}**!")
+        shake_count = 4 if spawned_domon['rarity'] == "Legendary" else random.randint(2, 3)
+        for i in range(shake_count):
+            await asyncio.sleep(1.1)
+            suspense_line = random.choice(suspense_msgs)
+            effect = random.choice(shake_emojis)
+            await anim_msg.edit(content=anim_msg.content + f"\n{effect} {suspense_line}")
 
-    if scan_timer_task:
-        scan_timer_task.cancel()
-        scan_timer_task = None
+        await asyncio.sleep(1)
+
+        if has_perfect:
+            player["inventory"]["PerfectDomoball"] -= 1
+            if player["inventory"]["PerfectDomoball"] == 0:
+                del player["inventory"]["PerfectDomoball"]
+            player["collection"].append(spawned_domon)
+            player["xp"] += 2
+            save_players(players)
+            msg = (
+                f"\n✨✨ **CRITICAL SUCCESS!** The DOMON can't resist!\n"
+                f"{ctx.author.mention} used a **PerfectDomoball** and INSTANTLY captured **{spawned_domon['name']}**! +2 XP!"
+            )
+            evolution_msg = check_evolution(user_id)
+            if evolution_msg:
+                msg += f"\n{evolution_msg}"
+            await anim_msg.edit(content=anim_msg.content + msg)
+            active_spawn = False
+            spawned_domon = None
+            scan_claimed = None
+            capture_attempted = None
+            if scan_timer_task:
+                scan_timer_task.cancel()
+                scan_timer_task = None
+            return
+
+        rates = {"Common": 0.90, "Uncommon": 0.65, "Rare": 0.30, "Legendary": 0.10}
+        success = random.random() < rates.get(spawned_domon["rarity"], 0.5)
+        player["inventory"]["Domoball"] -= 1
+        if player["inventory"]["Domoball"] == 0:
+            del player["inventory"]["Domoball"]
+
+        if success:
+            result_msg = random.choice([
+                "✨ Click! The DOMON was caught!",
+                "🎉 The ball stops moving... Success!",
+                "You did it! The DOMON is yours!",
+                "✨ The DOMON has been captured!"
+            ])
+            player["collection"].append(spawned_domon)
+            player["xp"] += 1
+            save_players(players)
+            msg = f"\n{result_msg} {ctx.author.mention} captured **{spawned_domon['name']}**! Added to your collection. +1 XP."
+            evolution_msg = check_evolution(user_id)
+            if evolution_msg:
+                msg += f"\n{evolution_msg}"
+            if player["xp"] % 10 == 0:
+                item = random.choice([i for i in DAILY_REWARDS["bonus_items"] if i != "PerfectDomoball"])
+                player["inventory"][item] = player["inventory"].get(item, 0) + 1
+                msg += f"\nYou reached {player['xp']} XP and received a bonus item: **{item}**!"
+            await anim_msg.edit(content=anim_msg.content + msg)
+            active_spawn = False
+            spawned_domon = None
+            scan_claimed = None
+            capture_attempted = None
+        else:
+            fail_msgs = [
+                "❌ Oh no! The DOMON broke free!",
+                "The ball opened... The DOMON escaped!",
+                "So close... but it’s gone!",
+                "❌ The DOMON got away!"
+            ]
+            await anim_msg.edit(content=anim_msg.content + f"\n{random.choice(fail_msgs)}")
+            active_spawn = False
+            spawned_domon = None
+            scan_claimed = None
+            capture_attempted = None
+
+        if scan_timer_task:
+            scan_timer_task.cancel()
+            scan_timer_task = None
 
 @bot.command(name="forcespawn")
 async def forcespawn(ctx):
+    if not_ready(ctx):
+        await ctx.send("Bot is still initializing. Try again in a few seconds!")
+        return
     authorized_id = "865185894197887018"
     if str(ctx.author.id) != authorized_id:
         await ctx.send("❌ Only the bot owner can use this command.")
