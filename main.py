@@ -285,21 +285,19 @@ def domon_intro_message(domon):
         "Legendary": intro_legendary
     }.get(rare, intro_common)
 
-# --- Patch: Loading protection ---
 bot_ready = False
 
 @bot.event
 async def on_ready():
     global bot_ready
     print(f"Bot ready as {bot.user}!")
-    await asyncio.sleep(2)  # Give extra time for Dropbox to load
+    await asyncio.sleep(2)
     bot_ready = True
     spawn_task.start()
 
 def not_ready(ctx):
     return not bot_ready or players is None or config is None
 
-# --- Patch: Timeout scan in English ---
 async def timeout_scan(ctx):
     global scan_claimed, active_spawn, spawned_domon, scan_timer_task, capture_attempted
     await asyncio.sleep(120)
@@ -309,7 +307,7 @@ async def timeout_scan(ctx):
         await ctx.send("⏰ Time's up! The DOMON was not captured. Anyone can !scan again.")
     scan_timer_task = None
 
-# --- Commands ---
+# === COMMANDS ===
 
 @bot.command(name="commands")
 async def commands_cmd(ctx):
@@ -388,7 +386,6 @@ async def daily(ctx):
     if not_ready(ctx):
         await ctx.send("Bot is still initializing. Try again in a few seconds!")
         return
-    print(f"!daily called by {ctx.author} ({ctx.author.id})")
     tz = pytz.timezone("Europe/Paris")
     now = datetime.now(tz).date()
     user_id = str(ctx.author.id)
@@ -540,7 +537,6 @@ async def scan(ctx):
     if not_ready(ctx):
         await ctx.send("Bot is still initializing. Try again in a few seconds!")
         return
-    print(f"!scan called by {ctx.author} ({ctx.author.id})")
     global scan_claimed, scan_timer_task, capture_attempted
     async with scan_lock:
         if not active_spawn or not spawned_domon:
@@ -569,7 +565,6 @@ async def capture(ctx):
     if not_ready(ctx):
         await ctx.send("Bot is still initializing. Try again in a few seconds!")
         return
-    print(f"!capture called by {ctx.author} ({ctx.author.id})")
     global spawned_domon, active_spawn, scan_claimed, scan_timer_task, capture_attempted
     async with scan_lock:
         user_id = str(ctx.author.id)
