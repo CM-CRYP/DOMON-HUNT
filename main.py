@@ -1791,21 +1791,6 @@ else:
 
 print("Player and config data loaded.")
 
-    
-    # --- PATCH collections (important pour tous les anciens DOMON capturés !) ---
-def patch_collections_with_stats(players, domon_list):
-    name2domon = {d['name']: d for d in domon_list}
-    updated = 0
-    for player in players.values():
-        collection = player.get("collection", [])
-        for d in collection:
-            ref = name2domon.get(d.get("name"))
-            if ref:
-                for field in ["num", "type", "rarity", "evolution", "description", "stats", "moves"]:
-                    d[field] = ref[field]
-                updated += 1
-    return updated
-
 # --- Other constants ---
 RARITY_PROBA = {"Common": 55, "Uncommon": 24, "Rare": 14, "Legendary": 7}
 STARTER_PACK = {"Domoball": 5, "Scan Tool": 1, "PerfectDomoball": 0}
@@ -2073,7 +2058,7 @@ async def spawn_task():
     active_spawn = True
     scan_claimed = None
     capture_attempted = None
-    channel = bot.get_channel(config["spawn_channel_id"])
+      channel = bot.get_channel(config["spawn_channel_id"])
     if channel:
         intro_msg = domon_intro_message(domon)
         await channel.send(
@@ -2107,6 +2092,7 @@ async def scan(ctx):
             "You are now the only one able to use !capture for this DOMON!\n"
             "⏰ You have **2 minutes** to capture it, or the DOMON will escape and scanning will reset!"
         )
+        # Lancement du timer après l'envoi du message (toujours le dernier !)
         if scan_timer_task is None:
             scan_timer_task = asyncio.create_task(timeout_scan(ctx))
 
@@ -2161,6 +2147,11 @@ async def capture(ctx):
         ]
         anim_msg = await ctx.send(f"{ctx.author.mention} throws a {ball_emoji} **{ball}** at **{spawned_domon['name']}**!")
         shake_count = 4 if spawned_domon['rarity'] == "Legendary" else random.randint(2, 3)
+        # FIX: Annule le timer PENDANT la capture (évite que le timer coupe l'animation !)
+        if scan_timer_task:
+            scan_timer_task.cancel()
+            scan_timer_task = None
+
         for i in range(shake_count):
             await asyncio.sleep(1.1)
             suspense_line = random.choice(suspense_msgs)
@@ -2188,9 +2179,6 @@ async def capture(ctx):
             spawned_domon = None
             scan_claimed = None
             capture_attempted = None
-            if scan_timer_task:
-                scan_timer_task.cancel()
-                scan_timer_task = None
             return
 
         rates = {"Common": 0.90, "Uncommon": 0.65, "Rare": 0.30, "Legendary": 0.10}
@@ -2234,10 +2222,6 @@ async def capture(ctx):
             spawned_domon = None
             scan_claimed = None
             capture_attempted = None
-
-        if scan_timer_task:
-            scan_timer_task.cancel()
-            scan_timer_task = None
 
 @bot.command(name="forcespawn")
 async def forcespawn(ctx):
