@@ -1761,6 +1761,7 @@ DOMON_LIST = [
             {"name": "Infinity Shield", "power": 0, "accuracy": 100, "desc": "Invincible for one turn."}
         ]
     }
+    ]
     
     # --- PATCH collections (important pour tous les anciens DOMON capturés !) ---
 def patch_collections_with_stats(players, domon_list):
