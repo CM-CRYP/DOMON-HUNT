@@ -1762,8 +1762,7 @@ DOMON_LIST = [
         ]
     }
     ]
-    
-    # --- PATCH collections (important pour tous les anciens DOMON capturés !) ---
+
 def patch_collections_with_stats(players, domon_list):
     name2domon = {d['name']: d for d in domon_list}
     updated = 0
@@ -1792,13 +1791,30 @@ else:
 
 print("Player and config data loaded.")
 
+    
+    # --- PATCH collections (important pour tous les anciens DOMON capturés !) ---
+def patch_collections_with_stats(players, domon_list):
+    name2domon = {d['name']: d for d in domon_list}
+    updated = 0
+    for player in players.values():
+        collection = player.get("collection", [])
+        for d in collection:
+            ref = name2domon.get(d.get("name"))
+            if ref:
+                for field in ["num", "type", "rarity", "evolution", "description", "stats", "moves"]:
+                    d[field] = ref[field]
+                updated += 1
+    return updated
 
 # --- Other constants ---
 RARITY_PROBA = {"Common": 55, "Uncommon": 24, "Rare": 14, "Legendary": 7}
 STARTER_PACK = {"Domoball": 5, "Scan Tool": 1, "PerfectDomoball": 0}
 DAILY_REWARDS = {
     "Domoball": 6,
-    "bonus_items": ["Scan Tool", "Small Repair Kit", "CryptoStamp", "Architectrap", "SpectraSeal", "BIMNet", "PerfectDomoball"]
+    "bonus_items": [
+        "Scan Tool", "Small Repair Kit", "CryptoStamp", "Architectrap",
+        "SpectraSeal", "BIMNet", "PerfectDomoball"
+    ]
 }
 
 def domon_intro_message(domon):
