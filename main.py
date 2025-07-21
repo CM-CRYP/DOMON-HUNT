@@ -2058,7 +2058,7 @@ async def spawn_task():
     active_spawn = True
     scan_claimed = None
     capture_attempted = None
-      channel = bot.get_channel(config["spawn_channel_id"])
+    channel = bot.get_channel(config["spawn_channel_id"])
     if channel:
         intro_msg = domon_intro_message(domon)
         await channel.send(
