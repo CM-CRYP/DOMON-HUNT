@@ -2147,7 +2147,99 @@ async def capture(ctx):
         ]
         anim_msg = await ctx.send(f"{ctx.author.mention} throws a {ball_emoji} **{ball}** at **{spawned_domon['name']}**!")
         shake_count = 4 if spawned_domon['rarity'] == "Legendary" else random.randint(2, 3)
-        # FIX: Annule le timer PENDANT la capture (évite que le timer coupe l'animation !)
+        suspense_text = anim_msg.content
+        try:
+            for i in range(shake_count):
+                await asyncio.sleep(1.1)
+                suspense_line = random.choice(suspense_msgs)
+                effect = random.choice(shake_emojis)
+                suspense_text += f"\n{effect} {suspense_line}"
+                await anim_msg.edit(content=suspense_text)
+        except Exception as e:
+            print(f"❌ Error editing suspense message: {e}")
+            await ctx.send("A suspense error happened, but the result will still show...")
+
+        await asyncio.sleep(1)
+
+        if has_perfect:
+            player["inventory"]["PerfectDomoball"] -= 1
+            if player["inventory"]["PerfectDomoball"] == 0:
+                del player["inventory"]["PerfectDomoball"]
+            player["collection"].append(spawned_domon)
+            player["xp"] += 2
+            save_players(players)
+            msg = (
+                f"\n✨✨ **CRITICAL SUCCESS!** The DOMON can't resist!\n"
+                f"{ctx.author.mention} used a **PerfectDomoball** and INSTANTLY captured **{spawned_domon['name']}**! +2 XP!"
+            )
+            evolution_msg = check_evolution(user_id)
+            if evolution_msg:
+                msg += f"\n{evolution_msg}"
+            try:
+                await anim_msg.edit(content=anim_msg.content + msg)
+            except Exception as e:
+                print(f"❌ Error editing final message: {e}")
+                await ctx.send(msg)
+            active_spawn = False
+            spawned_domon = None
+            scan_claimed = None
+            capture_attempted = None
+            if scan_timer_task:
+                scan_timer_task.cancel()
+                scan_timer_task = None
+            return
+
+        rates = {"Common": 0.90, "Uncommon": 0.65, "Rare": 0.30, "Legendary": 0.10}
+        success = random.random() < rates.get(spawned_domon["rarity"], 0.5)
+        player["inventory"]["Domoball"] -= 1
+        if player["inventory"]["Domoball"] == 0:
+            del player["inventory"]["Domoball"]
+
+        if success:
+            result_msg = random.choice([
+                "✨ Click! The DOMON was caught!",
+                "🎉 The ball stops moving... Success!",
+                "You did it! The DOMON is yours!",
+                "✨ The DOMON has been captured!"
+            ])
+            player["collection"].append(spawned_domon)
+            player["xp"] += 1
+            save_players(players)
+            msg = f"\n{result_msg} {ctx.author.mention} captured **{spawned_domon['name']}**! Added to your collection. +1 XP."
+            evolution_msg = check_evolution(user_id)
+            if evolution_msg:
+                msg += f"\n{evolution_msg}"
+            if player["xp"] % 10 == 0:
+                item = random.choice([i for i in DAILY_REWARDS["bonus_items"] if i != "PerfectDomoball"])
+                player["inventory"][item] = player["inventory"].get(item, 0) + 1
+                msg += f"\nYou reached {player['xp']} XP and received a bonus item: **{item}**!"
+            try:
+                await anim_msg.edit(content=anim_msg.content + msg)
+            except Exception as e:
+                print(f"❌ Error editing final message: {e}")
+                await ctx.send(msg)
+            active_spawn = False
+            spawned_domon = None
+            scan_claimed = None
+            capture_attempted = None
+        else:
+            fail_msgs = [
+                "❌ Oh no! The DOMON broke free!",
+                "The ball opened... The DOMON escaped!",
+                "So close... but it’s gone!",
+                "❌ The DOMON got away!"
+            ]
+            fail_msg = f"\n{random.choice(fail_msgs)}"
+            try:
+                await anim_msg.edit(content=anim_msg.content + fail_msg)
+            except Exception as e:
+                print(f"❌ Error editing final message: {e}")
+                await ctx.send(fail_msg)
+            active_spawn = False
+            spawned_domon = None
+            scan_claimed = None
+            capture_attempted = None
+
         if scan_timer_task:
             scan_timer_task.cancel()
             scan_timer_task = None
