@@ -2135,6 +2135,62 @@ async def capture(ctx):
                 scan_timer_task.cancel()
                 scan_timer_task = None
             return
+
+        # Résultat direct
+        if has_perfect:
+            player["inventory"]["PerfectDomoball"] -= 1
+            if player["inventory"]["PerfectDomoball"] == 0:
+                del player["inventory"]["PerfectDomoball"]
+            player["collection"].append(spawned_domon)
+            player["xp"] += 2
+            save_players(players)
+            msg = (
+                f"✨✨ **CRITICAL SUCCESS!** The DOMON can't resist!\n"
+                f"{ctx.author.mention} used a **PerfectDomoball** and INSTANTLY captured **{spawned_domon['name']}**! +2 XP!"
+            )
+            evolution_msg = check_evolution(user_id)
+            if evolution_msg:
+                msg += f"\n{evolution_msg}"
+            await ctx.send(msg)
+        else:
+            rates = {"Common": 0.90, "Uncommon": 0.65, "Rare": 0.30, "Legendary": 0.10}
+            success = random.random() < rates.get(spawned_domon["rarity"], 0.5)
+            player["inventory"]["Domoball"] -= 1
+            if player["inventory"]["Domoball"] == 0:
+                del player["inventory"]["Domoball"]
+            if success:
+                player["collection"].append(spawned_domon)
+                player["xp"] += 1
+                save_players(players)
+                msg = f"🎉 {ctx.author.mention} captured **{spawned_domon['name']}**! Added to your collection. +1 XP."
+                evolution_msg = check_evolution(user_id)
+                if evolution_msg:
+                    msg += f"\n{evolution_msg}"
+                if player["xp"] % 10 == 0:
+                    item = random.choice([i for i in DAILY_REWARDS["bonus_items"] if i != "PerfectDomoball"])
+                    player["inventory"][item] = player["inventory"].get(item, 0) + 1
+                    msg += f"\nYou reached {player['xp']} XP and received a bonus item: **{item}**!"
+                await ctx.send(msg)
+            else:
+                fail_msgs = [
+                    "❌ Oh no! The DOMON broke free!",
+                    "The ball opened... The DOMON escaped!",
+                    "So close... but it’s gone!",
+                    "❌ The DOMON got away!"
+                ]
+                fail_msg = f"{random.choice(fail_msgs)}"
+                await ctx.send(fail_msg)
+
+        active_spawn = False
+        spawned_domon = None
+        scan_claimed = None
+        capture_attempted = None
+
+        if scan_timer_task:
+            scan_timer_task.cancel()
+            scan_timer_task = None
+
+            return
         ball = "PerfectDomoball" if has_perfect else "Domoball"
         ball_emoji = "💎" if has_perfect else "🔵"
         shake_emojis = ["⬤", "⬤⬤", "⬤⬤⬤", "💥", "💫", "🌀", "✨"]
