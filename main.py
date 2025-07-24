@@ -2117,7 +2117,7 @@ async def use_item(ctx, *, item_name: str):
         del inv[normalized]
     save_players(players)
 
-@tasks.loop(minutes=15)
+@tasks.loop(minutes=5)
 async def spawn_task():
     if not bot_ready or state["active_spawn"] or not config.get("spawn_channel_id"):
         return
