@@ -2119,7 +2119,8 @@ async def use_item(ctx, *, item_name: str):
 
 @tasks.loop(minutes=5)
 async def spawn_task():
-    if not bot_ready or state["active_spawn"] or not config.get("spawn_channel_id"):
+    s = load_state()  # On charge le state à chaque tick !
+    if not bot_ready or s["active_spawn"] or not config.get("spawn_channel_id"):
         return
     domon = random.choices(DOMON_LIST, weights=[RARITY_PROBA.get(d["rarity"], 10) for d in DOMON_LIST], k=1)[0]
     set_spawned_domon(domon)
