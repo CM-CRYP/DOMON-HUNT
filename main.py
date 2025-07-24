@@ -69,11 +69,9 @@ STATE_FILE = "state.json"
 players = None
 config = None
 
-# --- Async lock for scan/capture concurrency ---
 scan_lock = asyncio.Lock()
 scan_timer_task = None
 
-# --- State management ---
 def load_state():
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE, "r", encoding="utf-8") as f:
@@ -101,44 +99,48 @@ def reset_state():
     save_state(state)
     return state
 
-state = load_state()
-
 def get_current_domon():
+    state = load_state()
     if state["spawned_domon"] is not None:
         return next((d for d in DOMON_LIST if d["num"] == state["spawned_domon"]), None)
     return None
 
 def set_spawned_domon(domon):
-    state["spawned_domon"] = domon["num"]
-    state["active_spawn"] = True
-    state["scan_claimed"] = None
-    state["capture_attempted"] = None
-    state["scan_timer_started"] = None
+    state = {
+        "active_spawn": True,
+        "spawned_domon": domon["num"],
+        "scan_claimed": None,
+        "capture_attempted": None,
+        "scan_timer_started": None
+    }
     save_state(state)
 
 def clear_spawn():
     reset_state()
 
 def claim_scan(user_id):
+    state = load_state()
     state["scan_claimed"] = user_id
     state["capture_attempted"] = None
     state["scan_timer_started"] = datetime.now(timezone.utc).isoformat()
     save_state(state)
 
 def mark_attempt(user_id):
+    state = load_state()
     state["capture_attempted"] = user_id
     save_state(state)
 
 def fail_capture():
-    clear_spawn()
+    reset_state()
 
 def success_capture():
-    clear_spawn()
+    reset_state()
 
 def scan_expired():
-    clear_spawn()
+    reset_state()
 
 def is_scan_expired():
+    state = load_state()
     if not state["scan_timer_started"]:
         return False
     started = datetime.fromisoformat(state["scan_timer_started"])
@@ -1904,12 +1906,11 @@ def not_ready(ctx):
 async def timeout_scan(ctx):
     global scan_timer_task
     await asyncio.sleep(120)
-    s = load_state()
-    if s["active_spawn"] and s["scan_claimed"]:
+    if is_scan_expired():
         scan_expired()
         await ctx.send("⏰ Time's up! The DOMON was not captured. Anyone can !scan again.")
     scan_timer_task = None
-    
+
 # === COMMANDS ===
 
 @bot.command(name="commands")
@@ -2165,7 +2166,6 @@ async def capture(ctx):
         user_id = str(ctx.author.id)
         player = players.get(user_id)
         domon = get_current_domon()
-        # Gestion timer expiré (fail safe, jamais bloqué)
         if is_scan_expired():
             scan_expired()
             await ctx.send("⏰ Time's up! The DOMON was not captured. Anyone can !scan again.")
@@ -2260,9 +2260,8 @@ async def forcespawn(ctx):
     if str(ctx.author.id) != authorized_id:
         await ctx.send("❌ Only the bot owner can use this command.")
         return
-    if state["active_spawn"]:
-        await ctx.send("⚠️ A DOMON is already spawned.")
-        return
+    # Toujours clear le state pour être sûr d'aucun DOMON bloqué :
+    clear_spawn()
     domon = random.choice(DOMON_LIST)
     set_spawned_domon(domon)
     intro_msg = domon_intro_message(domon)
@@ -2293,5 +2292,11 @@ def check_evolution(user_id):
                     return f"✨ Your {base_name} evolved into {evo_name}!"
     return None
 
+# === Flask keep-alive (pour Render) ===
 keep_alive()
-bot.run(TOKEN)
+
+if __name__ == "__main__":
+    try:
+        bot.run(TOKEN)
+    except Exception as e:
+        print(f"Bot crashed: {e}")
