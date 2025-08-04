@@ -9,32 +9,68 @@ from threading import Thread
 from flask import Flask
 from datetime import datetime, timezone
 import pytz
-import dropbox
+import requests
 
-# --- Dropbox config ---
-DROPBOX_TOKEN = os.getenv("DROPBOX_TOKEN")
+# --- Dropbox config v2: OAuth refresh ---
+DROPBOX_APP_KEY = os.getenv("DROPBOX_APP_KEY")
+DROPBOX_APP_SECRET = os.getenv("DROPBOX_APP_SECRET")
+DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
 DROPBOX_PATH = "/players.json"
 
+def get_dropbox_access_token():
+    url = "https://api.dropboxapi.com/oauth2/token"
+    data = {
+        "refresh_token": DROPBOX_REFRESH_TOKEN,
+        "grant_type": "refresh_token",
+        "client_id": DROPBOX_APP_KEY,
+        "client_secret": DROPBOX_APP_SECRET,
+    }
+    resp = requests.post(url, data=data)
+    if resp.status_code == 200:
+        return resp.json()["access_token"]
+    else:
+        print("❌ Dropbox refresh error:", resp.text)
+        return None
+
 def upload_players_dropbox():
-    if not DROPBOX_TOKEN:
-        print("❌ No DROPBOX_TOKEN found in environment.")
+    access_token = get_dropbox_access_token()
+    if not access_token:
+        print("❌ No Dropbox access token, can't upload.")
         return
-    dbx = dropbox.Dropbox(DROPBOX_TOKEN)
     with open("players.json", "rb") as f:
-        dbx.files_upload(f.read(), DROPBOX_PATH, mode=dropbox.files.WriteMode.overwrite)
-    print("☁️ players.json uploaded to Dropbox.")
+        data = f.read()
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/octet-stream",
+        "Dropbox-API-Arg": json.dumps({
+            "path": DROPBOX_PATH,
+            "mode": "overwrite",
+            "mute": True,
+        }),
+    }
+    resp = requests.post("https://content.dropboxapi.com/2/files/upload", headers=headers, data=data)
+    if resp.status_code == 200:
+        print("☁️ players.json uploaded to Dropbox.")
+    else:
+        print("❌ Failed to upload players.json:", resp.text)
 
 def download_players_dropbox():
-    if not DROPBOX_TOKEN:
-        print("❌ No DROPBOX_TOKEN found in environment.")
+    access_token = get_dropbox_access_token()
+    if not access_token:
+        print("❌ No Dropbox access token, can't download.")
         return
-    dbx = dropbox.Dropbox(DROPBOX_TOKEN)
-    try:
-        md, res = dbx.files_download(DROPBOX_PATH)
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Dropbox-API-Arg": json.dumps({
+            "path": DROPBOX_PATH
+        }),
+    }
+    resp = requests.post("https://content.dropboxapi.com/2/files/download", headers=headers)
+    if resp.status_code == 200:
         with open("players.json", "wb") as f:
-            f.write(res.content)
+            f.write(resp.content)
         print("✅ players.json downloaded from Dropbox.")
-    except dropbox.exceptions.ApiError:
+    else:
         print("🆕 No players.json found on Dropbox. Will create new one on first save.")
 
 # --- Keep-alive Flask server for Render ---
@@ -78,10 +114,10 @@ def load_state():
             return json.load(f)
     return {
         "active_spawn": False,
-        "spawned_domon": None,  # stocke le numéro du DOMON
+        "spawned_domon": None,
         "scan_claimed": None,
         "capture_attempted": None,
-        "scan_timer_started": None  # iso string
+        "scan_timer_started": None
     }
 
 def save_state(state):
@@ -1846,7 +1882,6 @@ def patch_collections_with_stats(players, domon_list):
                 updated += 1
     return updated
 
-# ---- Initialisation & PATCH ----
 print("Downloading player data from Dropbox (startup)...")
 download_players_dropbox()
 players = load_players()
@@ -1998,7 +2033,7 @@ async def daily(ctx):
         await ctx.send("Type !start to begin your hunt!")
         return
     if player["daily"] == str(now):
-        await ctx.send("You already claimed your daily reward today!")
+        await ctx.send(f"🕒 {ctx.author.mention} you already claimed your daily reward today!\n(6 Domoballs + 1 bonus item every 24h)")
         return
     player["daily"] = str(now)
     player["inventory"]["Domoball"] = player["inventory"].get("Domoball", 0) + DAILY_REWARDS["Domoball"]
@@ -2009,9 +2044,9 @@ async def daily(ctx):
     player["inventory"][bonus] = player["inventory"].get(bonus, 0) + 1
     save_players(players)
     if bonus == "PerfectDomoball":
-        await ctx.send(f"{ctx.author.mention} received 6 Domoballs and... 🟣 **A PERFECTDOMOBALL!** Ultra-rare!")
+        await ctx.send(f"{ctx.author.mention} received 6 Domoballs and... 🟣 **A PERFECTDOMOBALL!** Ultra-rare! (1% drop rate!)")
     else:
-        await ctx.send(f"{ctx.author.mention} received 6 Domoballs and 1 bonus item: **{bonus}**!")
+        await ctx.send(f"{ctx.author.mention} received 6 Domoballs and 1 bonus item: **{bonus}**! See you tomorrow!")
 
 @bot.command(name="inventory")
 async def inventory(ctx):
@@ -2119,7 +2154,7 @@ async def use_item(ctx, *, item_name: str):
 
 @tasks.loop(minutes=5)
 async def spawn_task():
-    s = load_state()  # On charge le state à chaque tick !
+    s = load_state()
     if not bot_ready or s["active_spawn"] or not config.get("spawn_channel_id"):
         return
     domon = random.choices(DOMON_LIST, weights=[RARITY_PROBA.get(d["rarity"], 10) for d in DOMON_LIST], k=1)[0]
