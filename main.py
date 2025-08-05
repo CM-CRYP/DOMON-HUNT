@@ -1964,6 +1964,7 @@ async def commands_cmd(ctx):
 **!use <item>** : Use an item (all items have a use!)  
 **!scan** : Scan the DOMON (required before capture!)  
 **!capture** : Attempt to catch (only first scanner can capture)  
+**!battle @user** : Start a PvP DOMON battle  
 **!addballs <amount>** : (Admin) Add Domoballs  
 **!setspawn** : (Admin) Set current channel for DOMON spawns  
 **!forcespawn** : (Admin) Force a DOMON to appear  
@@ -2327,6 +2328,145 @@ def check_evolution(user_id):
                     save_players(players)
                     return f"✨ Your {base_name} evolved into {evo_name}!"
     return None
+
+# === BATTLE SYSTEM ===
+from discord.ui import View, Button, Select
+
+ACTIVE_BATTLE = {}  # {guild_id: (player1_id, player2_id)}
+BATTLE_TIMEOUT = 60
+
+def get_player_domons(user_id):
+    player = players.get(user_id)
+    if not player or not player["collection"]:
+        return []
+    return player["collection"]
+
+class DomonSelectView(View):
+    def __init__(self, domons):
+        super().__init__(timeout=60)
+        options = [
+            discord.SelectOption(
+                label=f"{d['name']} ({d['rarity']})",
+                value=str(i),
+                description=d['description'][:90]
+            ) for i, d in enumerate(domons)
+        ]
+        self.domon = None
+        self.select = Select(placeholder="Choose your DOMON", options=options)
+        self.select.callback = self.selected
+        self.add_item(self.select)
+
+    async def selected(self, interaction):
+        self.domon = int(self.select.values[0])
+        self.stop()
+        await interaction.response.send_message(f"You chose **{self.select.options[self.domon].label}**!", ephemeral=True)
+
+class AttackView(View):
+    def __init__(self, domon):
+        super().__init__(timeout=BATTLE_TIMEOUT)
+        self.chosen = None
+        for i, move in enumerate(domon["moves"]):
+            async def attack_callback(interaction, i=i):
+                self.chosen = i
+                await interaction.response.defer()
+                self.stop()
+            self.add_item(Button(label=move["name"], style=discord.ButtonStyle.primary, custom_id=str(i), row=0))
+            self.children[-1].callback = attack_callback
+
+    async def on_timeout(self):
+        self.chosen = None
+        self.stop()
+
+@bot.command(name="battle")
+async def battle(ctx, opponent: discord.Member):
+    if ctx.guild.id in ACTIVE_BATTLE:
+        await ctx.send("A battle is already ongoing in this server. Please wait for it to finish.")
+        return
+    p1 = str(ctx.author.id)
+    p2 = str(opponent.id)
+    if p1 == p2:
+        await ctx.send("You cannot battle yourself!")
+        return
+    if p1 not in players or not get_player_domons(p1):
+        await ctx.send(f"{ctx.author.mention}, you need at least 1 DOMON to battle. Use !capture to catch one!")
+        return
+    if p2 not in players or not get_player_domons(p2):
+        await ctx.send(f"{opponent.mention} has no DOMON to battle.")
+        return
+
+    await ctx.send(f"⚔️ {ctx.author.mention} has challenged {opponent.mention} to a DOMON battle!\nEach player, please check your DMs to pick your DOMON.")
+    domons1 = get_player_domons(p1)
+    select1 = DomonSelectView(domons1)
+    msg1 = await ctx.author.send("Pick your DOMON for the battle:", view=select1)
+    await select1.wait()
+    if select1.domon is None:
+        await ctx.author.send("Timeout! Battle canceled.")
+        return
+    my_domon = domons1[select1.domon]
+
+    domons2 = get_player_domons(p2)
+    select2 = DomonSelectView(domons2)
+    msg2 = await opponent.send("Pick your DOMON for the battle:", view=select2)
+    await select2.wait()
+    if select2.domon is None:
+        await opponent.send("Timeout! Battle canceled.")
+        return
+    opp_domon = domons2[select2.domon]
+
+    ACTIVE_BATTLE[ctx.guild.id] = (p1, p2)
+    channel = bot.get_channel(config.get("spawn_channel_id")) or ctx.channel
+
+    await channel.send(f"🔥 **DOMON BATTLE:** {ctx.author.mention} (**{my_domon['name']}**) vs {opponent.mention} (**{opp_domon['name']}**)\nLet the battle begin! Each turn, click your attack. You have {BATTLE_TIMEOUT}s to answer, or your turn is skipped.")
+
+    hp1 = my_domon["stats"]["hp"]
+    hp2 = opp_domon["stats"]["hp"]
+    turn = 0  # 0 = player1, 1 = player2
+
+    while hp1 > 0 and hp2 > 0:
+        active, defending = (ctx.author, opponent) if turn == 0 else (opponent, ctx.author)
+        a_domon = my_domon if turn == 0 else opp_domon
+        d_domon = opp_domon if turn == 0 else my_domon
+        a_hp, d_hp = (hp1, hp2) if turn == 0 else (hp2, hp1)
+
+        atk_view = AttackView(a_domon)
+        atk_msg = await channel.send(
+            f"{active.mention}'s turn! ({a_domon['name']}, {a_hp}HP) - Choose an attack:",
+            view=atk_view,
+        )
+        await atk_view.wait()
+
+        if atk_view.chosen is None:
+            await channel.send(f"⏳ {active.display_name} didn't choose an attack in time! Turn skipped.")
+            turn = 1 - turn
+            await asyncio.sleep(1)
+            continue
+
+        move = a_domon["moves"][int(atk_view.chosen)]
+        hit = random.random() < move["accuracy"] / 100
+        if hit:
+            dmg = move["power"] + a_domon["stats"]["atk"] // 2 - d_domon["stats"]["def"] // 4
+            dmg = max(1, dmg)
+            if turn == 0:
+                hp2 -= dmg
+            else:
+                hp1 -= dmg
+            await channel.send(f"💥 {active.display_name}'s **{move['name']}** hits! {dmg} damage!")
+        else:
+            await channel.send(f"😬 {active.display_name}'s **{move['name']}** missed!")
+
+        turn = 1 - turn
+        await asyncio.sleep(1)
+
+    if hp1 <= 0 or hp2 <= 0:
+        winner = ctx.author if hp2 <= 0 else opponent
+        loser = opponent if winner == ctx.author else ctx.author
+        await channel.send(f"🏆 **{winner.display_name}** wins the DOMON battle against {loser.display_name}!")
+        win_player = players[str(winner.id)]
+        win_player["xp"] += 2
+        save_players(players)
+
+    if ctx.guild.id in ACTIVE_BATTLE:
+        del ACTIVE_BATTLE[ctx.guild.id]
 
 # === Flask keep-alive (pour Render) ===
 keep_alive()
