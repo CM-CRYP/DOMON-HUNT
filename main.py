@@ -1,5 +1,7 @@
+# main.py
 import os
 import json
+import unicodedata
 import discord
 import random
 import asyncio
@@ -7,11 +9,13 @@ from discord.ext import commands, tasks
 from dotenv import load_dotenv
 from threading import Thread
 from flask import Flask
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import pytz
 import requests
 
-# --- Dropbox config v2: OAuth refresh ---
+# =========================
+# --- Dropbox config v2 ---
+# =========================
 DROPBOX_APP_KEY = os.getenv("DROPBOX_APP_KEY")
 DROPBOX_APP_SECRET = os.getenv("DROPBOX_APP_SECRET")
 DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
@@ -25,9 +29,13 @@ def get_dropbox_access_token():
         "client_id": DROPBOX_APP_KEY,
         "client_secret": DROPBOX_APP_SECRET,
     }
-    resp = requests.post(url, data=data)
+    try:
+        resp = requests.post(url, data=data, timeout=15)
+    except Exception as e:
+        print("❌ Dropbox refresh error:", e)
+        return None
     if resp.status_code == 200:
-        return resp.json()["access_token"]
+        return resp.json().get("access_token")
     else:
         print("❌ Dropbox refresh error:", resp.text)
         return None
@@ -36,6 +44,9 @@ def upload_players_dropbox():
     access_token = get_dropbox_access_token()
     if not access_token:
         print("❌ No Dropbox access token, can't upload.")
+        return
+    if not os.path.exists("players.json"):
+        print("ℹ️ No players.json to upload yet.")
         return
     with open("players.json", "rb") as f:
         data = f.read()
@@ -48,7 +59,11 @@ def upload_players_dropbox():
             "mute": True,
         }),
     }
-    resp = requests.post("https://content.dropboxapi.com/2/files/upload", headers=headers, data=data)
+    try:
+        resp = requests.post("https://content.dropboxapi.com/2/files/upload", headers=headers, data=data, timeout=20)
+    except Exception as e:
+        print("❌ Failed to upload players.json:", e)
+        return
     if resp.status_code == 200:
         print("☁️ players.json uploaded to Dropbox.")
     else:
@@ -61,11 +76,13 @@ def download_players_dropbox():
         return
     headers = {
         "Authorization": f"Bearer {access_token}",
-        "Dropbox-API-Arg": json.dumps({
-            "path": DROPBOX_PATH
-        }),
+        "Dropbox-API-Arg": json.dumps({"path": DROPBOX_PATH}),
     }
-    resp = requests.post("https://content.dropboxapi.com/2/files/download", headers=headers)
+    try:
+        resp = requests.post("https://content.dropboxapi.com/2/files/download", headers=headers, timeout=20)
+    except Exception as e:
+        print("❌ Dropbox download error:", e)
+        return
     if resp.status_code == 200:
         with open("players.json", "wb") as f:
             f.write(resp.content)
@@ -73,12 +90,14 @@ def download_players_dropbox():
     else:
         print("🆕 No players.json found on Dropbox. Will create new one on first save.")
 
-# --- Keep-alive Flask server for Render ---
+# ==============================
+# --- Keep-alive Flask server ---
+# ==============================
 app = Flask('')
 
 @app.route('/')
 def home():
-    return "MYİKKİ Domon Bot is running!"
+    return "MYIKKI Domon Bot is running!"
 
 def run():
     app.run(host='0.0.0.0', port=8080)
@@ -87,9 +106,12 @@ def keep_alive():
     t = Thread(target=run)
     t.start()
 
+# =============================
 # --- Discord & Global State ---
+# =============================
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
+OWNER_ID = os.getenv("OWNER_ID")  # mets ton ID discord ici (dans l'env) pour les commandes owner
 
 intents = discord.Intents.default()
 intents.messages = True
@@ -108,6 +130,23 @@ config = None
 scan_lock = asyncio.Lock()
 scan_timer_task = None
 
+# --------- Helpers encodage / temps ----------
+def normalize_str(s: str) -> str:
+    """Supprime accents/diacritiques pour comparaisons robustes."""
+    if not isinstance(s, str):
+        return s
+    return unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii").strip().lower()
+
+def now_utc_iso():
+    return datetime.now(timezone.utc).isoformat()
+
+def parse_iso(dt_str):
+    try:
+        return datetime.fromisoformat(dt_str) if dt_str else None
+    except Exception:
+        return None
+
+# --------- Game-wide state ----------
 def load_state():
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE, "r", encoding="utf-8") as f:
@@ -117,7 +156,8 @@ def load_state():
         "spawned_domon": None,
         "scan_claimed": None,
         "capture_attempted": None,
-        "scan_timer_started": None
+        "scan_timer_started": None,
+        "bimnet_until": None  # ISO string
     }
 
 def save_state(state):
@@ -125,13 +165,14 @@ def save_state(state):
         json.dump(state, f, ensure_ascii=False, indent=2)
 
 def reset_state():
-    state = {
+    state = load_state()
+    state.update({
         "active_spawn": False,
         "spawned_domon": None,
         "scan_claimed": None,
         "capture_attempted": None,
         "scan_timer_started": None
-    }
+    })
     save_state(state)
     return state
 
@@ -142,13 +183,14 @@ def get_current_domon():
     return None
 
 def set_spawned_domon(domon):
-    state = {
+    state = load_state()
+    state.update({
         "active_spawn": True,
         "spawned_domon": domon["num"],
         "scan_claimed": None,
         "capture_attempted": None,
         "scan_timer_started": None
-    }
+    })
     save_state(state)
 
 def clear_spawn():
@@ -158,7 +200,7 @@ def claim_scan(user_id):
     state = load_state()
     state["scan_claimed"] = user_id
     state["capture_attempted"] = None
-    state["scan_timer_started"] = datetime.now(timezone.utc).isoformat()
+    state["scan_timer_started"] = now_utc_iso()
     save_state(state)
 
 def mark_attempt(user_id):
@@ -179,9 +221,23 @@ def is_scan_expired():
     state = load_state()
     if not state["scan_timer_started"]:
         return False
-    started = datetime.fromisoformat(state["scan_timer_started"])
+    started = parse_iso(state["scan_timer_started"])
+    if not started:
+        return False
     now = datetime.now(timezone.utc)
     return (now - started).total_seconds() > 120
+
+def is_bimnet_active():
+    state = load_state()
+    if not state["bimnet_until"]:
+        return False
+    until = parse_iso(state["bimnet_until"])
+    return until and datetime.now(timezone.utc) < until
+
+def activate_bimnet(minutes=30):
+    state = load_state()
+    state["bimnet_until"] = (datetime.now(timezone.utc) + timedelta(minutes=minutes)).isoformat()
+    save_state(state)
 
 def load_players():
     if os.path.exists(SAVE_FILE):
@@ -1868,35 +1924,9 @@ DOMON_LIST = [
         ]
     }
     ]
-
-def patch_collections_with_stats(players, domon_list):
-    name2domon = {d['name']: d for d in domon_list}
-    updated = 0
-    for player in players.values():
-        collection = player.get("collection", [])
-        for d in collection:
-            ref = name2domon.get(d.get("name"))
-            if ref:
-                for field in ["num", "type", "rarity", "evolution", "description", "stats", "moves"]:
-                    d[field] = ref[field]
-                updated += 1
-    return updated
-
-print("Downloading player data from Dropbox (startup)...")
-download_players_dropbox()
-players = load_players()
-config = load_config()
-
-nb = patch_collections_with_stats(players, DOMON_LIST)
-if nb > 0:
-    save_players(players)
-    print(f"✅ PATCH collections: {nb} DOMON(s) mis à jour avec stats/moves.")
-else:
-    print("✅ PATCH collections: aucun DOMON à mettre à jour ou déjà au bon format.")
-
-print("Player and config data loaded.")
-
-# --- Other constants ---
+# ======================
+# --- Game Constants ---
+# ======================
 RARITY_PROBA = {"Common": 55, "Uncommon": 24, "Rare": 14, "Legendary": 7}
 STARTER_PACK = {"Domoball": 5, "Scan Tool": 1, "PerfectDomoball": 0}
 DAILY_REWARDS = {
@@ -1907,6 +1937,12 @@ DAILY_REWARDS = {
     ]
 }
 
+BASE_SPAWN_CHANCE = 0.60  # sans BIMNet
+BIMNET_SPAWN_CHANCE = 1.00  # avec BIMNet
+
+# =========================
+# --- Helper / UI bits  ---
+# =========================
 def domon_intro_message(domon):
     rare = domon['rarity']
     name = domon['name']
@@ -1925,6 +1961,13 @@ def domon_intro_message(domon):
         "Legendary": intro_legendary
     }.get(rare, intro_common)
 
+def hp_bar(hp, max_hp, width=20):
+    n = max(0, int(width * max(0, hp) / max_hp))
+    return "█"*n + "░"*(width-n)
+
+# =========
+#  READY
+# =========
 bot_ready = False
 
 @bot.event
@@ -1946,14 +1989,46 @@ async def timeout_scan(ctx):
         await ctx.send("⏰ Time's up! The DOMON was not captured. Anyone can !scan again.")
     scan_timer_task = None
 
-# === COMMANDS ===
+# =========================================
+# --- Patch collections with fresh stats ---
+# =========================================
+def patch_collections_with_stats(players, domon_list):
+    # dictionnaire par nom normalisé, mais on garde l'affichage original
+    name2domon = {normalize_str(d['name']): d for d in domon_list}
+    updated = 0
+    for player in players.values():
+        collection = player.get("collection", [])
+        for d in collection:
+            ref = name2domon.get(normalize_str(d.get("name", "")))
+            if ref:
+                for field in ["num", "type", "rarity", "evolution", "description", "stats", "moves"]:
+                    d[field] = ref[field]
+                updated += 1
+    return updated
 
+print("Downloading player data from Dropbox (startup)...")
+download_players_dropbox()
+players = load_players()
+config = load_config()
+
+nb = patch_collections_with_stats(players, DOMON_LIST)
+if nb > 0:
+    save_players(players)
+    print(f"✅ PATCH collections: {nb} DOMON(s) mis à jour avec stats/moves.")
+else:
+    print("✅ PATCH collections: aucun DOMON à mettre à jour ou déjà au bon format.")
+
+print("Player and config data loaded.")
+
+# ===============
+#  COMMANDS
+# ===============
 @bot.command(name="commands")
 async def commands_cmd(ctx):
     if not_ready(ctx):
         await ctx.send("Bot is still initializing. Try again in a few seconds!")
         return
-    embed = discord.Embed(title="MYİKKİ DOMON Commands", color=0x82eefd)
+    embed = discord.Embed(title="MYIKKI DOMON Commands", color=0x82eefd)
     embed.description = """
 **!start** : Start your DOMON adventure  
 **!daily** : Get your daily Domoballs (6/day) + 1 bonus item  
@@ -1961,13 +2036,12 @@ async def commands_cmd(ctx):
 **!collection** : View your captured DOMON  
 **!domodex** : Complete DOMON list  
 **!info <name/num>** : Info on a DOMON  
-**!use <item>** : Use an item (all items have a use!)  
+**!use <item>** : Use an item (real effects)  
 **!scan** : Scan the DOMON (required before capture!)  
 **!capture** : Attempt to catch (only first scanner can capture)  
 **!battle @user** : Start a PvP DOMON battle  
-**!addballs <amount>** : (Admin) Add Domoballs  
-**!setspawn** : (Admin) Set current channel for DOMON spawns  
-**!forcespawn** : (Admin) Force a DOMON to appear  
+**!setspawn** : (Owner) Set current channel for DOMON spawns  
+**!forcespawn** : (Owner) Force a DOMON to appear  
     """
     await ctx.send(embed=embed)
 
@@ -1976,8 +2050,7 @@ async def set_spawn_channel(ctx):
     if not_ready(ctx):
         await ctx.send("Bot is still initializing. Try again in a few seconds!")
         return
-    authorized_id = "865185894197887018"
-    if str(ctx.author.id) != authorized_id:
+    if OWNER_ID and str(ctx.author.id) != str(OWNER_ID):
         await ctx.send("❌ Only the bot owner can use this command.")
         return
     config["spawn_channel_id"] = ctx.channel.id
@@ -1989,8 +2062,7 @@ async def addballs(ctx, amount: int):
     if not_ready(ctx):
         await ctx.send("Bot is still initializing. Try again in a few seconds!")
         return
-    authorized_id = "865185894197887018"
-    if str(ctx.author.id) != authorized_id:
+    if OWNER_ID and str(ctx.author.id) != str(OWNER_ID):
         await ctx.send("❌ Only the bot owner can use this command.")
         return
     user_id = str(ctx.author.id)
@@ -2015,13 +2087,18 @@ async def start_game(ctx):
             "captures": {},
             "daily": None,
             "evolutions": {},
+            "flags": {
+                "double_xp_next_capture": False,
+                "spectraseal_reroll": False
+            }
         }
         save_players(players)
-        await ctx.send(f"{ctx.author.mention} Welcome to MYİKKİ DOMON HUNT!\nYou receive: 5 Domoballs and 1 Scan Tool! Type !inventory to see your items.")
+        await ctx.send(f"{ctx.author.mention} Welcome to **MYIKKI DOMON HUNT**!\nYou receive: 5 Domoballs and 1 Scan Tool! Type !inventory to see your items.")
     else:
         await ctx.send("You already have an account! Use !inventory.")
 
 @bot.command(name="daily")
+@commands.cooldown(1, 5, commands.BucketType.user)
 async def daily(ctx):
     if not_ready(ctx):
         await ctx.send("Bot is still initializing. Try again in a few seconds!")
@@ -2062,6 +2139,9 @@ async def inventory(ctx):
     embed = discord.Embed(title=f"{ctx.author.display_name}'s Inventory", color=0xFFD700)
     for k, v in player["inventory"].items():
         embed.add_field(name=k, value=str(v), inline=True)
+    flags = player.get("flags", {})
+    if any(flags.values()):
+        embed.add_field(name="Active Effects", value=", ".join([k for k, v in flags.items() if v]), inline=False)
     await ctx.send(embed=embed)
 
 @bot.command(name="collection")
@@ -2080,8 +2160,8 @@ async def collection(ctx):
     embed = discord.Embed(title=f"{ctx.author.display_name}'s Domon Collection", color=0x7DF9FF)
     txt = ""
     for d in player["collection"]:
-        txt += f"#{d['num']} {d['name']} ({d['rarity']})\n"
-    embed.description = txt
+        txt += f"#{d['num']:03d} {d['name']} ({d['rarity']})\n"
+    embed.description = txt[:4000]
     await ctx.send(embed=embed)
 
 @bot.command(name="domodex")
@@ -2089,19 +2169,35 @@ async def domodex(ctx):
     if not_ready(ctx):
         await ctx.send("Bot is still initializing. Try again in a few seconds!")
         return
-    embed = discord.Embed(title="DOMODEX – Complete List", color=0x6e34ff)
-    domotxt = ""
-    for d in DOMON_LIST:
-        domotxt += f"#{d['num']:03d} {d['name']} ({d['type']}, {d['rarity']})\n"
-    embed.description = domotxt[:4000]
-    await ctx.send(embed=embed)
+    # frac par pages si très long
+    lines = [f"#{d['num']:03d} {d['name']} ({d['type']}, {d['rarity']})" for d in DOMON_LIST]
+    chunks = []
+    block = ""
+    for line in lines:
+        if len(block) + len(line) + 1 > 3800:
+            chunks.append(block)
+            block = ""
+        block += line + "\n"
+    if block:
+        chunks.append(block)
+    for i, chunk in enumerate(chunks, 1):
+        embed = discord.Embed(title=f"DOMODEX – Complete List (page {i}/{len(chunks)})", color=0x6e34ff)
+        embed.description = chunk
+        await ctx.send(embed=embed)
 
 @bot.command(name="info")
 async def domon_info(ctx, *, name_or_num: str):
     if not_ready(ctx):
         await ctx.send("Bot is still initializing. Try again in a few seconds!")
         return
-    domon = next((d for d in DOMON_LIST if d["name"].lower() == name_or_num.lower() or str(d["num"]) == name_or_num), None)
+    domon = None
+    # recherche par numéro
+    if name_or_num.isdigit():
+        domon = next((d for d in DOMON_LIST if str(d["num"]) == name_or_num), None)
+    # sinon par nom (normalisé accents)
+    if not domon:
+        key = normalize_str(name_or_num)
+        domon = next((d for d in DOMON_LIST if normalize_str(d["name"]) == key), None)
     if not domon:
         await ctx.send("Unknown DOMON.")
         return
@@ -2113,6 +2209,9 @@ async def domon_info(ctx, *, name_or_num: str):
     embed.add_field(name="Description", value=domon['description'], inline=False)
     await ctx.send(embed=embed)
 
+# ==========================
+# --- ITEMS: real effects ---
+# ==========================
 @bot.command(name="use")
 async def use_item(ctx, *, item_name: str):
     if not_ready(ctx):
@@ -2124,52 +2223,104 @@ async def use_item(ctx, *, item_name: str):
         await ctx.send("Type !start to begin your hunt!")
         return
     inv = player["inventory"]
-    normalized = item_name.strip().title().replace("Perfectdomoball", "PerfectDomoball")
-    if normalized not in inv or inv[normalized] <= 0:
-        await ctx.send(f"You don't have any **{normalized}**.")
+    normalized = item_name.strip().replace(" ", "").lower()
+    # normalisations souples
+    aliases = {
+        "perfectdomoball": "PerfectDomoball",
+        "perfectball": "PerfectDomoball",
+        "domoball": "Domoball",
+        "scantool": "Scan Tool",
+        "smallrepairkit": "Small Repair Kit",
+        "cryptostamp": "CryptoStamp",
+        "architectrap": "Architectrap",
+        "spectraseal": "SpectraSeal",
+        "bimnet": "BIMNet",
+    }
+    canonical = aliases.get(normalized, item_name.strip())
+    # compatibilité casse
+    key = None
+    for k in list(inv.keys()):
+        if normalize_str(k) == normalize_str(canonical):
+            key = k
+            break
+    if key is None or inv.get(key, 0) <= 0:
+        await ctx.send(f"You don't have any **{canonical}**.")
         return
-    if normalized == "Scan Tool":
-        await ctx.send("Use !scan instead! The scan tool is always available for scanning DOMONs.")
-    elif normalized == "Small Repair Kit":
+
+    msg = None
+    consume = True
+
+    if normalize_str(key) == normalize_str("Scan Tool"):
+        msg = "Use **!scan** directly. The Scan Tool is built-in and doesn't get consumed."
+        consume = False
+
+    elif normalize_str(key) == normalize_str("Small Repair Kit"):
         player["xp"] += 1
-        await ctx.send(f"🔧 {ctx.author.mention} used a **Small Repair Kit** and gained +1 XP!")
-    elif normalized == "CryptoStamp":
+        msg = f"🔧 {ctx.author.mention} used a **Small Repair Kit** and gained **+1 XP**!"
+
+    elif normalize_str(key) == normalize_str("CryptoStamp"):
         bonus = random.choice([i for i in DAILY_REWARDS["bonus_items"] if i != "PerfectDomoball"])
         player["inventory"][bonus] = player["inventory"].get(bonus, 0) + 1
-        await ctx.send(f"📦 {ctx.author.mention} used a **CryptoStamp** and received 1 bonus item: **{bonus}**!")
-    elif normalized == "Architectrap":
-        player["xp"] += 1
-        await ctx.send(f"🪤 {ctx.author.mention} used an **Architectrap**! Next DOMON you capture has double XP!")
-    elif normalized == "SpectraSeal":
-        await ctx.send(f"🔒 {ctx.author.mention} used a **SpectraSeal**! Your next DOMON can't escape if you succeed.")
-    elif normalized == "BIMNet":
-        await ctx.send(f"🕸️ {ctx.author.mention} used a **BIMNet**! DOMON spawn rate doubled for 30 min. (Effect simulation)")
-    elif normalized == "PerfectDomoball":
-        await ctx.send("Use the PerfectDomoball directly during capture with !capture! It will always succeed.")
-    else:
-        await ctx.send("This item has no defined use yet.")
-    inv[normalized] -= 1
-    if inv[normalized] <= 0:
-        del inv[normalized]
-    save_players(players)
+        msg = f"📦 {ctx.author.mention} used a **CryptoStamp** and received 1 bonus item: **{bonus}**!"
 
+    elif normalize_str(key) == normalize_str("Architectrap"):
+        player.setdefault("flags", {})
+        player["flags"]["double_xp_next_capture"] = True
+        msg = f"🪤 {ctx.author.mention} armed an **Architectrap**! **Your next successful capture will grant +2 XP**."
+
+    elif normalize_str(key) == normalize_str("SpectraSeal"):
+        player.setdefault("flags", {})
+        player["flags"]["spectraseal_reroll"] = True
+        msg = f"🔒 {ctx.author.mention} applied a **SpectraSeal**! **Your next capture gets a free reroll if it fails.**"
+
+    elif normalize_str(key) == normalize_str("BIMNet"):
+        activate_bimnet(minutes=30)
+        msg = f"🕸️ {ctx.author.mention} deployed **BIMNet**! **DOMON spawn chance boosted for 30 minutes.**"
+
+    elif normalize_str(key) == normalize_str("PerfectDomoball"):
+        msg = "Use the **PerfectDomoball** during capture with **!capture** to guarantee success."
+        consume = False
+
+    else:
+        msg = "This item has no defined use yet."
+        consume = False
+
+    if consume:
+        inv[key] -= 1
+        if inv[key] <= 0:
+            del inv[key]
+
+    save_players(players)
+    await ctx.send(msg)
+
+# ==========================
+# --- Spawns (loop)      ---
+# ==========================
 @tasks.loop(minutes=5)
 async def spawn_task():
     s = load_state()
     if not bot_ready or s["active_spawn"] or not config.get("spawn_channel_id"):
         return
+
+    # Chance de spawn modulée par BIMNet
+    chance = BIMNET_SPAWN_CHANCE if is_bimnet_active() else BASE_SPAWN_CHANCE
+    if random.random() > chance:
+        return
+
     domon = random.choices(DOMON_LIST, weights=[RARITY_PROBA.get(d["rarity"], 10) for d in DOMON_LIST], k=1)[0]
     set_spawned_domon(domon)
     channel = bot.get_channel(config["spawn_channel_id"])
     if channel:
         intro_msg = domon_intro_message(domon)
-        await channel.send(
-            f"{intro_msg}\n"
-            f"Type: {domon['type']} | Rarity: {domon['rarity']}\n_Description_: {domon['description']}\n"
-            "Type !scan to be the first to scan and unlock the right to capture it!"
-        )
+        embed = discord.Embed(title="DOMON Spawn", description=intro_msg, color=0x9b59b6)
+        embed.add_field(name="Type", value=domon['type'])
+        embed.add_field(name="Rarity", value=domon['rarity'])
+        embed.add_field(name="Description", value=domon['description'], inline=False)
+        embed.set_footer(text="Use !scan to be the first and unlock !capture!")
+        await channel.send(embed=embed)
 
 @bot.command(name="scan")
+@commands.cooldown(1, 3, commands.BucketType.user)
 async def scan(ctx):
     global scan_timer_task
     async with scan_lock:
@@ -2185,17 +2336,20 @@ async def scan(ctx):
             return
         claim_scan(str(ctx.author.id))
         domon = get_current_domon()
-        await ctx.send(
-            f"🔍 {ctx.author.mention} scanned the DOMON first!\n"
-            f"DOMON: **{domon['name']}**\n"
-            f"Type: {domon['type']} | Rarity: {domon['rarity']}\n_Description_: {domon['description']}\n"
-            "You are now the only one able to use !capture for this DOMON!\n"
-            "⏰ You have **2 minutes** to capture it, or the DOMON will escape and scanning will reset!"
+        embed = discord.Embed(
+            title=f"🔍 Scan success — {domon['name']}",
+            description="You are now the **only** one able to use **!capture** for this DOMON.\n⏰ You have **2 minutes**!",
+            color=0x00c3ff
         )
+        embed.add_field(name="Type", value=domon['type'])
+        embed.add_field(name="Rarity", value=domon['rarity'])
+        embed.add_field(name="Description", value=domon['description'], inline=False)
+        await ctx.send(content=ctx.author.mention, embed=embed)
         if scan_timer_task is None:
             scan_timer_task = asyncio.create_task(timeout_scan(ctx))
 
 @bot.command(name="capture")
+@commands.cooldown(1, 3, commands.BucketType.user)
 async def capture(ctx):
     global scan_timer_task
     async with scan_lock:
@@ -2203,31 +2357,33 @@ async def capture(ctx):
         user_id = str(ctx.author.id)
         player = players.get(user_id)
         domon = get_current_domon()
+
         if is_scan_expired():
             scan_expired()
             await ctx.send("⏰ Time's up! The DOMON was not captured. Anyone can !scan again.")
             scan_timer_task = None
             return
+
         if not s["active_spawn"] or not domon:
             await ctx.send("No DOMON to capture.")
-            clear_spawn()
             return
+
         if not player:
             await ctx.send("Type !start to begin your hunt!")
-            clear_spawn()
             return
+
         if s["scan_claimed"] != user_id:
             await ctx.send("Only the **first** player who scanned this DOMON can try to capture it!")
-            clear_spawn()
             return
+
         if s["capture_attempted"] == user_id:
-            await ctx.send("You have already tried to capture this DOMON. Wait for another scan!")
-            clear_spawn()
+            await ctx.send("You already tried to capture this DOMON. Wait for another scan!")
             return
+
         if s["capture_attempted"] is not None:
             await ctx.send("A capture attempt has already been made for this DOMON. Wait for the next scan!")
-            clear_spawn()
             return
+
         mark_attempt(user_id)
 
         has_perfect = player["inventory"].get("PerfectDomoball", 0) > 0
@@ -2237,76 +2393,93 @@ async def capture(ctx):
                 f"{ctx.author.mention} you have no Domoballs or PerfectDomoball left! "
                 "You lose the right to capture this DOMON. Someone else can now !scan and try!"
             )
-            clear_spawn()
+            fail_capture()
             return
 
-        # Résultat direct
+        # PERFECT: succès garanti
         if has_perfect:
             player["inventory"]["PerfectDomoball"] -= 1
             if player["inventory"]["PerfectDomoball"] == 0:
                 del player["inventory"]["PerfectDomoball"]
             player["collection"].append(domon)
-            player["xp"] += 2
+
+            gained_xp = 2 if player.get("flags", {}).get("double_xp_next_capture") else 1
+            if player.get("flags", {}).get("double_xp_next_capture"):
+                player["flags"]["double_xp_next_capture"] = False
+            player["xp"] += gained_xp
+
             save_players(players)
             msg = (
-                f"✨✨ **CRITICAL SUCCESS!** The DOMON can't resist!\n"
-                f"{ctx.author.mention} used a **PerfectDomoball** and INSTANTLY captured **{domon['name']}**! +2 XP!"
+                f"✨ **CRITICAL SUCCESS!** {ctx.author.mention} used a **PerfectDomoball** and captured **{domon['name']}**!\n"
+                f"+{gained_xp} XP."
             )
-            evolution_msg = check_evolution(user_id)
-            if evolution_msg:
-                msg += f"\n{evolution_msg}"
+            evo_msg = check_evolution(user_id)
+            if evo_msg:
+                msg += f"\n{evo_msg}"
+            await ctx.send(msg)
+            success_capture()
+            return
+
+        # REGULAR capture (avec SpectraSeal reroll)
+        rates = {"Common": 0.90, "Uncommon": 0.65, "Rare": 0.30, "Legendary": 0.10}
+        base_success = rates.get(domon["rarity"], 0.5)
+
+        player["inventory"]["Domoball"] -= 1
+        if player["inventory"]["Domoball"] == 0:
+            del player["inventory"]["Domoball"]
+
+        # premier jet
+        success = random.random() < base_success
+
+        # Reroll si SpectraSeal actif et échec
+        if not success and player.get("flags", {}).get("spectraseal_reroll"):
+            success = random.random() < base_success
+            player["flags"]["spectraseal_reroll"] = False
+
+        if success:
+            player["collection"].append(domon)
+            gained_xp = 2 if player.get("flags", {}).get("double_xp_next_capture") else 1
+            if player.get("flags", {}).get("double_xp_next_capture"):
+                player["flags"]["double_xp_next_capture"] = False
+            player["xp"] += gained_xp
+            save_players(players)
+            msg = f"🎉 {ctx.author.mention} captured **{domon['name']}**! Added to your collection. +{gained_xp} XP."
+            evo_msg = check_evolution(user_id)
+            if evo_msg:
+                msg += f"\n{evo_msg}"
+            if player["xp"] % 10 == 0:
+                item = random.choice([i for i in DAILY_REWARDS["bonus_items"] if i != "PerfectDomoball"])
+                player["inventory"][item] = player["inventory"].get(item, 0) + 1
+                save_players(players)
+                msg += f"\nMilestone: {player['xp']} XP → Bonus item: **{item}**!"
             await ctx.send(msg)
             success_capture()
             return
         else:
-            rates = {"Common": 0.90, "Uncommon": 0.65, "Rare": 0.30, "Legendary": 0.10}
-            success = random.random() < rates.get(domon["rarity"], 0.5)
-            player["inventory"]["Domoball"] -= 1
-            if player["inventory"]["Domoball"] == 0:
-                del player["inventory"]["Domoball"]
-            if success:
-                player["collection"].append(domon)
-                player["xp"] += 1
-                save_players(players)
-                msg = f"🎉 {ctx.author.mention} captured **{domon['name']}**! Added to your collection. +1 XP."
-                evolution_msg = check_evolution(user_id)
-                if evolution_msg:
-                    msg += f"\n{evolution_msg}"
-                if player["xp"] % 10 == 0:
-                    item = random.choice([i for i in DAILY_REWARDS["bonus_items"] if i != "PerfectDomoball"])
-                    player["inventory"][item] = player["inventory"].get(item, 0) + 1
-                    msg += f"\nYou reached {player['xp']} XP and received a bonus item: **{item}**!"
-                await ctx.send(msg)
-                success_capture()
-                return
-            else:
-                fail_msgs = [
-                    "❌ Oh no! The DOMON broke free!",
-                    "The ball opened... The DOMON escaped!",
-                    "So close... but it’s gone!",
-                    "❌ The DOMON got away!"
-                ]
-                fail_msg = f"{random.choice(fail_msgs)}"
-                await ctx.send(fail_msg)
-                fail_capture()
-                return
+            fail_msgs = [
+                "❌ Oh no! The DOMON broke free!",
+                "The ball opened... The DOMON escaped!",
+                "So close... but it’s gone!",
+                "❌ The DOMON got away!"
+            ]
+            await ctx.send(random.choice(fail_msgs))
+            fail_capture()
+            return
 
 @bot.command(name="forcespawn")
 async def forcespawn(ctx):
-    authorized_id = "865185894197887018"
-    if str(ctx.author.id) != authorized_id:
+    if OWNER_ID and str(ctx.author.id) != str(OWNER_ID):
         await ctx.send("❌ Only the bot owner can use this command.")
         return
-    # Toujours clear le state pour être sûr d'aucun DOMON bloqué :
     clear_spawn()
     domon = random.choice(DOMON_LIST)
     set_spawned_domon(domon)
     intro_msg = domon_intro_message(domon)
-    await ctx.send(
-        f"**(Admin)** {intro_msg}\n"
-        f"Type: {domon['type']} | Rarity: {domon['rarity']}\n_Description_: {domon['description']}\n"
-        "Type !scan to be the first to scan and unlock the right to capture it!"
-    )
+    embed = discord.Embed(title="(Admin) Forced Spawn", description=intro_msg, color=0xe67e22)
+    embed.add_field(name="Type", value=domon['type'])
+    embed.add_field(name="Rarity", value=domon['rarity'])
+    embed.add_field(name="Description", value=domon['description'], inline=False)
+    await ctx.send(embed=embed)
 
 def check_evolution(user_id):
     player = players[user_id]
@@ -2315,8 +2488,9 @@ def check_evolution(user_id):
     counts = {}
     for domon in collection:
         counts[domon["name"]] = counts.get(domon["name"], 0) + 1
+    # évolue si on a 3 fois le même de base (simple)
     for domon in DOMON_LIST:
-        if domon["evolution"] and domon["evolution"] not in evolved_names:
+        if domon.get("evolution") and domon["evolution"] not in evolved_names:
             base_name = domon["name"]
             evo_name = domon["evolution"]
             required = 3
@@ -2326,10 +2500,12 @@ def check_evolution(user_id):
                     collection.append(evolved_domon)
                     player["xp"] += 2
                     save_players(players)
-                    return f"✨ Your {base_name} evolved into {evo_name}!"
+                    return f"✨ Your {base_name} evolved into {evo_name}! (+2 XP)"
     return None
 
-# === BATTLE SYSTEM ===
+# =========================
+# --- BATTLE SYSTEM UI  ---
+# =========================
 from discord.ui import View, Button, Select
 
 ACTIVE_BATTLE = {}  # {guild_id: (player1_id, player2_id)}
@@ -2352,7 +2528,7 @@ class DomonSelectView(View):
             ) for i, d in enumerate(domons)
         ]
         self.domon = None
-        self.select = Select(placeholder="Choose your DOMON", options=options)
+        self.select = Select(placeholder="Choose your DOMON", options=options, min_values=1, max_values=1)
         self.select.callback = self.selected
         self.add_item(self.select)
 
@@ -2362,22 +2538,35 @@ class DomonSelectView(View):
         await interaction.response.send_message(f"You chose **{self.select.options[self.domon].label}**!", ephemeral=True)
 
 class AttackView(View):
-    def __init__(self, domon):
+    def __init__(self, domon, allowed_user_id: int):
         super().__init__(timeout=BATTLE_TIMEOUT)
+        self.allowed_user_id = allowed_user_id
         self.chosen = None
         for i, move in enumerate(domon["moves"]):
+            btn = Button(label=move["name"], style=discord.ButtonStyle.primary, custom_id=str(i))
             async def attack_callback(interaction, i=i):
+                if interaction.user.id != self.allowed_user_id:
+                    await interaction.response.send_message("Not your turn!", ephemeral=True)
+                    return
                 self.chosen = i
                 await interaction.response.defer()
                 self.stop()
-            self.add_item(Button(label=move["name"], style=discord.ButtonStyle.primary, custom_id=str(i), row=0))
-            self.children[-1].callback = attack_callback
+            btn.callback = attack_callback
+            self.add_item(btn)
 
     async def on_timeout(self):
         self.chosen = None
         self.stop()
 
+def compute_damage(move, atk_stats, def_stats, crit=False):
+    base = move["power"] + atk_stats["atk"] // 2 - def_stats["def"] // 4
+    dmg = max(1, base)
+    if crit:
+        dmg = int(dmg * 1.5)
+    return dmg
+
 @bot.command(name="battle")
+@commands.cooldown(1, 5, commands.BucketType.user)
 async def battle(ctx, opponent: discord.Member):
     if ctx.guild.id in ACTIVE_BATTLE:
         await ctx.send("A battle is already ongoing in this server. Please wait for it to finish.")
@@ -2394,10 +2583,14 @@ async def battle(ctx, opponent: discord.Member):
         await ctx.send(f"{opponent.mention} has no DOMON to battle.")
         return
 
-    await ctx.send(f"⚔️ {ctx.author.mention} has challenged {opponent.mention} to a DOMON battle!\nEach player, please check your DMs to pick your DOMON.")
+    await ctx.send(f"⚔️ {ctx.author.mention} has challenged {opponent.mention} to a DOMON battle!\nEach player, check your DMs to pick your DOMON.")
     domons1 = get_player_domons(p1)
     select1 = DomonSelectView(domons1)
-    msg1 = await ctx.author.send("Pick your DOMON for the battle:", view=select1)
+    try:
+        await ctx.author.send("Pick your DOMON for the battle:", view=select1)
+    except discord.Forbidden:
+        await ctx.send("I can't DM you. Please enable DMs from server members and retry.")
+        return
     await select1.wait()
     if select1.domon is None:
         await ctx.author.send("Timeout! Battle canceled.")
@@ -2406,7 +2599,11 @@ async def battle(ctx, opponent: discord.Member):
 
     domons2 = get_player_domons(p2)
     select2 = DomonSelectView(domons2)
-    msg2 = await opponent.send("Pick your DOMON for the battle:", view=select2)
+    try:
+        await opponent.send("Pick your DOMON for the battle:", view=select2)
+    except discord.Forbidden:
+        await ctx.send("I can't DM your opponent. Battle canceled.")
+        return
     await select2.wait()
     if select2.domon is None:
         await opponent.send("Timeout! Battle canceled.")
@@ -2416,43 +2613,91 @@ async def battle(ctx, opponent: discord.Member):
     ACTIVE_BATTLE[ctx.guild.id] = (p1, p2)
     channel = bot.get_channel(config.get("spawn_channel_id")) or ctx.channel
 
-    await channel.send(f"🔥 **DOMON BATTLE:** {ctx.author.mention} (**{my_domon['name']}**) vs {opponent.mention} (**{opp_domon['name']}**)\nLet the battle begin! Each turn, click your attack. You have {BATTLE_TIMEOUT}s to answer, or your turn is skipped.")
+    await channel.send(
+        f"🔥 **DOMON BATTLE:** {ctx.author.mention} (**{my_domon['name']}**) vs {opponent.mention} (**{opp_domon['name']}**)\n"
+        f"Let the battle begin! Each turn, click your attack. You have {BATTLE_TIMEOUT}s to answer, or your turn is skipped."
+    )
 
-    hp1 = my_domon["stats"]["hp"]
-    hp2 = opp_domon["stats"]["hp"]
+    max_hp1 = my_domon["stats"]["hp"]
+    max_hp2 = opp_domon["stats"]["hp"]
+    hp1 = max_hp1
+    hp2 = max_hp2
+
+    # simple buff trackers — DEF ↑ pendant 2 tours
+    buffs = {
+        "p1_def_up": 0,
+        "p2_def_up": 0
+    }
+
     turn = 0  # 0 = player1, 1 = player2
 
     while hp1 > 0 and hp2 > 0:
         active, defending = (ctx.author, opponent) if turn == 0 else (opponent, ctx.author)
         a_domon = my_domon if turn == 0 else opp_domon
         d_domon = opp_domon if turn == 0 else my_domon
-        a_hp, d_hp = (hp1, hp2) if turn == 0 else (hp2, hp1)
 
-        atk_view = AttackView(a_domon)
+        a_stats = a_domon["stats"].copy()
+        d_stats = d_domon["stats"].copy()
+
+        # apply def buffs
+        if turn == 0 and buffs["p2_def_up"] > 0:
+            d_stats["def"] = int(d_stats["def"] * 1.5)
+        if turn == 1 and buffs["p1_def_up"] > 0:
+            d_stats["def"] = int(d_stats["def"] * 1.5)
+
+        allowed = active.id
+        atk_view = AttackView(a_domon, allowed_user_id=allowed)
         atk_msg = await channel.send(
-            f"{active.mention}'s turn! ({a_domon['name']}, {a_hp}HP) - Choose an attack:",
+            f"{active.mention}'s turn! (**{a_domon['name']}**, {hp1 if turn==0 else hp2} HP)\n"
+            f"{defending.display_name}'s {d_domon['name']} HP: `{hp_bar(hp2 if turn==0 else hp1, max_hp2 if turn==0 else max_hp1)}`",
             view=atk_view,
         )
         await atk_view.wait()
 
         if atk_view.chosen is None:
             await channel.send(f"⏳ {active.display_name} didn't choose an attack in time! Turn skipped.")
+            # decay buffs
+            if buffs["p1_def_up"] > 0: buffs["p1_def_up"] -= 1
+            if buffs["p2_def_up"] > 0: buffs["p2_def_up"] -= 1
             turn = 1 - turn
             await asyncio.sleep(1)
             continue
 
         move = a_domon["moves"][int(atk_view.chosen)]
-        hit = random.random() < move["accuracy"] / 100
-        if hit:
-            dmg = move["power"] + a_domon["stats"]["atk"] // 2 - d_domon["stats"]["def"] // 4
-            dmg = max(1, dmg)
+
+        # MISS check (accuracy) + dodge bonus by speed
+        dodge_bonus = max(0.0, (d_stats["spd"] - a_stats["spd"]) * 0.005)  # 0.5% par point de spd d'écart
+        hit_roll = random.random()
+        hit_threshold = (move["accuracy"] / 100.0) * (1.0 - dodge_bonus)
+        hit = hit_roll < hit_threshold
+
+        if move["power"] == 0:
+            # Tous les moves de soutien => DEF ↑ 2 tours
+            if turn == 0:
+                buffs["p1_def_up"] = 2
+            else:
+                buffs["p2_def_up"] = 2
+            await channel.send(f"🛡️ {active.display_name}'s **{move['name']}** grants a shield: DEF ↑ 2 turns!")
+        elif hit:
+            crit = random.random() < 0.10
+            dmg = compute_damage(move, a_stats, d_stats, crit=crit)
             if turn == 0:
                 hp2 -= dmg
             else:
                 hp1 -= dmg
-            await channel.send(f"💥 {active.display_name}'s **{move['name']}** hits! {dmg} damage!")
+
+            crit_txt = " **(CRIT!)**" if crit else ""
+            await channel.send(
+                f"💥 {active.display_name}'s **{move['name']}** hits for **{dmg}** damage!{crit_txt}\n"
+                f"{defending.display_name}'s {d_domon['name']} HP: `{hp_bar(hp2 if turn==0 else hp1, max_hp2 if turn==0 else max_hp1)}` "
+                f"({max(0, hp2 if turn==0 else hp1)}/{max_hp2 if turn==0 else max_hp1})"
+            )
         else:
             await channel.send(f"😬 {active.display_name}'s **{move['name']}** missed!")
+
+        # decay buffs
+        if buffs["p1_def_up"] > 0: buffs["p1_def_up"] -= 1
+        if buffs["p2_def_up"] > 0: buffs["p2_def_up"] -= 1
 
         turn = 1 - turn
         await asyncio.sleep(1)
@@ -2468,7 +2713,9 @@ async def battle(ctx, opponent: discord.Member):
     if ctx.guild.id in ACTIVE_BATTLE:
         del ACTIVE_BATTLE[ctx.guild.id]
 
-# === Flask keep-alive (pour Render) ===
+# ==========================
+# --- Flask keep-alive   ---
+# ==========================
 keep_alive()
 
 if __name__ == "__main__":
