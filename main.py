@@ -1,11 +1,11 @@
-# main.py
 import os
+import sys
 import json
+import time
 import unicodedata
 import discord
 import random
 import asyncio
-import logging
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
 from threading import Thread
@@ -13,6 +13,22 @@ from flask import Flask
 from datetime import datetime, timezone, timedelta
 import pytz
 import requests
+
+# =============================
+# ======  CONFIG GLOBAL  ======
+# =============================
+load_dotenv()
+
+TOKEN = os.getenv("DISCORD_TOKEN")
+# Fallback sur ton ID si OWNER_ID n'est pas défini côté Render
+OWNER_ID = str(os.getenv("OWNER_ID", "865185894197887018"))
+
+SAVE_FILE = "players.json"
+CONFIG_FILE = "config.json"
+STATE_FILE = "state.json"
+
+# PORT rendu dispo par Render pour un Web Service
+PORT = int(os.getenv("PORT", "8080"))
 
 # =========================
 # --- Dropbox config v2 ---
@@ -33,21 +49,21 @@ def get_dropbox_access_token():
     try:
         resp = requests.post(url, data=data, timeout=15)
     except Exception as e:
-        print("❌ Dropbox refresh error:", e)
+        print("❌ Dropbox refresh error:", e, flush=True)
         return None
     if resp.status_code == 200:
         return resp.json().get("access_token")
     else:
-        print("❌ Dropbox refresh error:", resp.text)
+        print("❌ Dropbox refresh error:", resp.text, flush=True)
         return None
 
 def upload_players_dropbox():
     access_token = get_dropbox_access_token()
     if not access_token:
-        print("❌ No Dropbox access token, can't upload.")
+        print("❌ No Dropbox access token, can't upload.", flush=True)
         return
     if not os.path.exists("players.json"):
-        print("ℹ️ No players.json to upload yet.")
+        print("ℹ️ No players.json to upload yet.", flush=True)
         return
     with open("players.json", "rb") as f:
         data = f.read()
@@ -63,17 +79,17 @@ def upload_players_dropbox():
     try:
         resp = requests.post("https://content.dropboxapi.com/2/files/upload", headers=headers, data=data, timeout=20)
     except Exception as e:
-        print("❌ Failed to upload players.json:", e)
+        print("❌ Failed to upload players.json:", e, flush=True)
         return
     if resp.status_code == 200:
-        print("☁️ players.json uploaded to Dropbox.")
+        print("☁️ players.json uploaded to Dropbox.", flush=True)
     else:
-        print("❌ Failed to upload players.json:", resp.text)
+        print("❌ Failed to upload players.json:", resp.text, flush=True)
 
 def download_players_dropbox():
     access_token = get_dropbox_access_token()
     if not access_token:
-        print("❌ No Dropbox access token, can't download.")
+        print("❌ No Dropbox access token, can't download.", flush=True)
         return
     headers = {
         "Authorization": f"Bearer {access_token}",
@@ -82,14 +98,14 @@ def download_players_dropbox():
     try:
         resp = requests.post("https://content.dropboxapi.com/2/files/download", headers=headers, timeout=20)
     except Exception as e:
-        print("❌ Dropbox download error:", e)
+        print("❌ Dropbox download error:", e, flush=True)
         return
     if resp.status_code == 200:
         with open("players.json", "wb") as f:
             f.write(resp.content)
-        print("✅ players.json downloaded from Dropbox.")
+        print("✅ players.json downloaded from Dropbox.", flush=True)
     else:
-        print("🆕 No players.json found on Dropbox. Will create new one on first save.")
+        print("🆕 No players.json found on Dropbox. Will create new one on first save.", flush=True)
 
 # ==============================
 # --- Keep-alive Flask server ---
@@ -101,8 +117,8 @@ def home():
     return "MYIKKI Domon Bot is running!"
 
 def run():
-    # Serveur keep-alive (utile si tu as un healthcheck Render)
-    app.run(host='0.0.0.0', port=8080)
+    # Bind sur le PORT Render si Web Service
+    app.run(host='0.0.0.0', port=PORT)
 
 def keep_alive():
     t = Thread(target=run, daemon=True)
@@ -111,18 +127,6 @@ def keep_alive():
 # =============================
 # --- Discord & Global State ---
 # =============================
-load_dotenv()
-TOKEN = os.getenv("DISCORD_TOKEN")
-OWNER_ID = (os.getenv("OWNER_ID") or "865185894197887018").strip()  # mets ton ID si besoin
-
-# -------- Logger (réduit le bruit) --------
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("domonbot")
-logging.getLogger("discord.client").setLevel(logging.WARNING)
-logging.getLogger("discord.gateway").setLevel(logging.WARNING)
-logging.getLogger("discord.http").setLevel(logging.WARNING)
-logging.getLogger("werkzeug").setLevel(logging.ERROR)
-
 intents = discord.Intents.default()
 intents.messages = True
 intents.message_content = True
@@ -131,69 +135,13 @@ intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-SAVE_FILE = "players.json"
-CONFIG_FILE = "config.json"
-STATE_FILE = "state.json"
 players = None
 config = None
 
 scan_lock = asyncio.Lock()
+spawn_lock = asyncio.Lock()
 scan_timer_task = None
-
-# =========================
-# --- Envoi SAFE (queue) ---
-# =========================
-from discord.errors import HTTPException
-_message_queue = asyncio.Queue()
-_message_worker_started = False
-
-async def _message_worker():
-    # cadence globale pour limiter les 429 REST en rafale
-    while True:
-        channel, send_kwargs = await _message_queue.get()
-        try:
-            await channel.send(**send_kwargs)
-            await asyncio.sleep(1.2)
-        except HTTPException as e:
-            if getattr(e, "status", None) == 429:
-                logger.warning("Rate limited (429) on send → backoff retries")
-                for delay in (2, 4, 8, 16, 32):
-                    try:
-                        await asyncio.sleep(delay)
-                        await channel.send(**send_kwargs)
-                        break
-                    except HTTPException as e2:
-                        if getattr(e2, "status", None) != 429:
-                            raise
-                else:
-                    logger.error("Abandon message after multiple 429.")
-            else:
-                logger.exception("HTTPException during send")
-        except Exception:
-            logger.exception("Unexpected error during send")
-        finally:
-            _message_queue.task_done()
-
-def _ensure_worker():
-    global _message_worker_started
-    if not _message_worker_started:
-        asyncio.create_task(_message_worker())
-        _message_worker_started = True
-
-async def safe_send(target, content: str = None, embed=None, **kwargs):
-    """
-    Utilise TOUJOURS safe_send(...) pour les messages sans View.
-    target peut être un ctx ou un channel.
-    """
-    _ensure_worker()
-    channel = target.channel if hasattr(target, "channel") else target
-    params = {}
-    if content is not None:
-        params["content"] = content
-    if embed is not None:
-        params["embed"] = embed
-    params.update(kwargs)
-    await _message_queue.put((channel, params))
+last_forcespawn_ts = 0.0  # pour éviter le double message après !forcespawn
 
 # --------- Helpers encodage / temps ----------
 def normalize_str(s: str) -> str:
@@ -247,6 +195,7 @@ def get_current_domon():
     return None
 
 def set_spawned_domon(domon):
+    # MAJ atomique sans passer par clear_spawn() pour éviter une fenêtre race
     state = load_state()
     state.update({
         "active_spawn": True,
@@ -1988,8 +1937,6 @@ DOMON_LIST = [
         ]
     }
     ]
-
-# ======================
 # --- Game Constants ---
 # ======================
 RARITY_PROBA = {"Common": 55, "Uncommon": 24, "Rare": 14, "Legendary": 7}
@@ -2001,7 +1948,6 @@ DAILY_REWARDS = {
         "SpectraSeal", "BIMNet", "PerfectDomoball"
     ]
 }
-
 BASE_SPAWN_CHANCE = 0.60
 BIMNET_SPAWN_CHANCE = 1.00
 
@@ -2035,15 +1981,29 @@ def hp_bar(hp, max_hp, width=20):
 # =========
 bot_ready = False
 
+async def safe_send(dest, *args, retries=3, **kwargs):
+    """Envoi avec backoff si 429 (Cloudflare/API)."""
+    for attempt in range(retries):
+        try:
+            if isinstance(dest, commands.Context):
+                return await dest.send(*args, **kwargs)
+            else:
+                return await dest.send(*args, **kwargs)
+        except discord.HTTPException as e:
+            if e.status == 429 and attempt < retries - 1:
+                delay = 2 ** attempt + random.random()
+                await asyncio.sleep(delay)
+                continue
+            raise
+
 @bot.event
 async def on_ready():
     global bot_ready
-    if bot_ready:
-        return
+    print(f"Bot ready as {bot.user}!", flush=True)
+    await asyncio.sleep(1)
     bot_ready = True
     if not spawn_task.is_running():
         spawn_task.start()
-    print(f"Bot ready as {bot.user}!")
 
 def not_ready(ctx):
     return not bot_ready or players is None or config is None
@@ -2072,7 +2032,7 @@ def patch_collections_with_stats(players, domon_list):
                 updated += 1
     return updated
 
-print("Downloading player data from Dropbox (startup)...")
+print("Downloading player data from Dropbox (startup)...", flush=True)
 download_players_dropbox()
 players = load_players()
 config = load_config()
@@ -2080,34 +2040,19 @@ config = load_config()
 nb = patch_collections_with_stats(players, DOMON_LIST)
 if nb > 0:
     save_players(players)
-    print(f"✅ PATCH collections: {nb} DOMON(s) mis à jour avec stats/moves.")
+    print(f"✅ PATCH collections: {nb} DOMON(s) mis à jour avec stats/moves.", flush=True)
 else:
-    print("✅ PATCH collections: aucun DOMON à mettre à jour ou déjà au bon format.")
+    print("✅ PATCH collections: aucun DOMON à mettre à jour ou déjà au bon format.", flush=True)
 
-print("Player and config data loaded.")
+print("Player and config data loaded.", flush=True)
 
-# =========================
-# --- SPAWN SAFE/LOCK   ---
-# =========================
-spawn_in_progress = asyncio.Lock()
+# ============
+#  CHECKS
+# ============
+def is_owner_user(ctx):
+    return str(ctx.author.id) == OWNER_ID
 
-async def spawn_random_domon(channel):
-    """Spawn sécurisé (anti-double, 1 seul message)."""
-    if spawn_in_progress.locked():
-        return
-    async with spawn_in_progress:
-        s = load_state()
-        if s["active_spawn"]:
-            return
-        domon = random.choices(DOMON_LIST, weights=[RARITY_PROBA.get(d["rarity"], 10) for d in DOMON_LIST], k=1)[0]
-        set_spawned_domon(domon)
-        intro_msg = domon_intro_message(domon)
-        embed = discord.Embed(title="DOMON Spawn", description=intro_msg, color=0x9b59b6)
-        embed.add_field(name="Type", value=domon['type'])
-        embed.add_field(name="Rarity", value=domon['rarity'])
-        embed.add_field(name="Description", value=domon['description'], inline=False)
-        embed.set_footer(text="Use !scan to be the first and unlock !capture!")
-        await safe_send(channel, embed=embed)
+owner_only = commands.check(is_owner_user)
 
 # ===============
 #  COMMANDS
@@ -2135,24 +2080,20 @@ async def commands_cmd(ctx):
     await safe_send(ctx, embed=embed)
 
 @bot.command(name="setspawn")
+@owner_only
 async def set_spawn_channel(ctx):
     if not_ready(ctx):
         await safe_send(ctx, "Bot is still initializing. Try again in a few seconds!")
-        return
-    if str(ctx.author.id) != str(OWNER_ID):
-        await safe_send(ctx, "❌ Only the bot owner can use this command.")
         return
     config["spawn_channel_id"] = ctx.channel.id
     save_config(config)
     await safe_send(ctx, "✅ This channel is now the official DOMON spawn point!")
 
 @bot.command(name="addballs")
+@owner_only
 async def addballs(ctx, amount: int):
     if not_ready(ctx):
         await safe_send(ctx, "Bot is still initializing. Try again in a few seconds!")
-        return
-    if str(ctx.author.id) != str(OWNER_ID):
-        await safe_send(ctx, "❌ Only the bot owner can use this command.")
         return
     user_id = str(ctx.author.id)
     if user_id not in players:
@@ -2259,7 +2200,8 @@ async def domodex(ctx):
         await safe_send(ctx, "Bot is still initializing. Try again in a few seconds!")
         return
     lines = [f"#{d['num']:03d} {d['name']} ({d['type']}, {d['rarity']})" for d in DOMON_LIST]
-    chunks, block = [], ""
+    chunks = []
+    block = ""
     for line in lines:
         if len(block) + len(line) + 1 > 3800:
             chunks.append(block)
@@ -2381,15 +2323,34 @@ async def use_item(ctx, *, item_name: str):
 # ==========================
 @tasks.loop(minutes=5)
 async def spawn_task():
-    s = load_state()
-    if not bot_ready or s["active_spawn"] or not config.get("spawn_channel_id"):
-        return
-    chance = BIMNET_SPAWN_CHANCE if is_bimnet_active() else BASE_SPAWN_CHANCE
-    if random.random() > chance:
-        return
-    channel = bot.get_channel(config["spawn_channel_id"])
-    if channel:
-        await spawn_random_domon(channel)
+    async with spawn_lock:
+        s = load_state()
+        if not bot_ready or s["active_spawn"] or not config.get("spawn_channel_id"):
+            return
+
+        # éviter un spawn juste après un !forcespawn (fenêtre très courte)
+        if time.monotonic() - last_forcespawn_ts < 3.0:
+            return
+
+        chance = BIMNET_SPAWN_CHANCE if is_bimnet_active() else BASE_SPAWN_CHANCE
+        if random.random() > chance:
+            return
+
+        domon = random.choices(DOMON_LIST, weights=[RARITY_PROBA.get(d["rarity"], 10) for d in DOMON_LIST], k=1)[0]
+        set_spawned_domon(domon)
+        channel = bot.get_channel(config["spawn_channel_id"])
+        if channel:
+            intro_msg = domon_intro_message(domon)
+            embed = discord.Embed(title="DOMON Spawn", description=intro_msg, color=0x9b59b6)
+            embed.add_field(name="Type", value=domon['type'])
+            embed.add_field(name="Rarity", value=domon['rarity'])
+            embed.add_field(name="Description", value=domon['description'], inline=False)
+            embed.set_footer(text="Use !scan to be the first and unlock !capture!")
+            try:
+                await channel.send(embed=embed)
+            except discord.HTTPException as e:
+                if e.status == 429:
+                    await asyncio.sleep(2.0)
 
 @bot.command(name="scan")
 @commands.cooldown(1, 3, commands.BucketType.user)
@@ -2469,6 +2430,7 @@ async def capture(ctx):
             fail_capture()
             return
 
+        # PERFECT: succès garanti
         if has_perfect:
             player["inventory"]["PerfectDomoball"] -= 1
             if player["inventory"]["PerfectDomoball"] == 0:
@@ -2492,6 +2454,7 @@ async def capture(ctx):
             success_capture()
             return
 
+        # REGULAR capture (avec SpectraSeal reroll)
         rates = {"Common": 0.90, "Uncommon": 0.65, "Rare": 0.30, "Legendary": 0.10}
         base_success = rates.get(domon["rarity"], 0.5)
 
@@ -2536,12 +2499,20 @@ async def capture(ctx):
             return
 
 @bot.command(name="forcespawn")
+@owner_only
 async def forcespawn(ctx):
-    if str(ctx.author.id) != str(OWNER_ID):
-        await safe_send(ctx, "❌ Only the bot owner can use this command.")
-        return
-    clear_spawn()
-    await spawn_random_domon(ctx.channel)
+    global last_forcespawn_ts
+    async with spawn_lock:
+        # pas de clear_spawn séparé -> set atomique
+        domon = random.choice(DOMON_LIST)
+        set_spawned_domon(domon)
+        intro_msg = domon_intro_message(domon)
+        embed = discord.Embed(title="(Admin) Forced Spawn", description=intro_msg, color=0xe67e22)
+        embed.add_field(name="Type", value=domon['type'])
+        embed.add_field(name="Rarity", value=domon['rarity'])
+        embed.add_field(name="Description", value=domon['description'], inline=False)
+        await safe_send(ctx, embed=embed)
+        last_forcespawn_ts = time.monotonic()
 
 def check_evolution(user_id):
     player = players[user_id]
@@ -2656,7 +2627,7 @@ async def battle(ctx, opponent: discord.Member):
     if select1.domon is None:
         try:
             await ctx.author.send("Timeout! Battle canceled.")
-        except:
+        except discord.Forbidden:
             pass
         return
     my_domon = domons1[select1.domon]
@@ -2672,7 +2643,7 @@ async def battle(ctx, opponent: discord.Member):
     if select2.domon is None:
         try:
             await opponent.send("Timeout! Battle canceled.")
-        except:
+        except discord.Forbidden:
             pass
         return
     opp_domon = domons2[select2.domon]
@@ -2692,7 +2663,7 @@ async def battle(ctx, opponent: discord.Member):
     hp2 = max_hp2
 
     buffs = {"p1_def_up": 0, "p2_def_up": 0}
-    turn = 0
+    turn = 0  # 0 = player1, 1 = player2
 
     while hp1 > 0 and hp2 > 0:
         active, defending = (ctx.author, opponent) if turn == 0 else (opponent, ctx.author)
@@ -2707,9 +2678,10 @@ async def battle(ctx, opponent: discord.Member):
         if turn == 1 and buffs["p1_def_up"] > 0:
             d_stats["def"] = int(d_stats["def"] * 1.5)
 
-        # Ici on doit obtenir un objet Message pour attacher la View, donc envoi direct (pas safe_send)
-        atk_view = AttackView(a_domon, allowed_user_id=active.id)
-        await channel.send(
+        allowed = active.id
+        atk_view = AttackView(a_domon, allowed_user_id=allowed)
+        atk_msg = await safe_send(
+            channel,
             f"{active.mention}'s turn! (**{a_domon['name']}**, {hp1 if turn==0 else hp2} HP)\n"
             f"{defending.display_name}'s {d_domon['name']} HP: `{hp_bar(hp2 if turn==0 else hp1, max_hp2 if turn==0 else max_hp1)}`",
             view=atk_view,
@@ -2725,6 +2697,7 @@ async def battle(ctx, opponent: discord.Member):
             continue
 
         move = a_domon["moves"][int(atk_view.chosen)]
+
         dodge_bonus = max(0.0, (d_stats["spd"] - a_stats["spd"]) * 0.005)
         hit_roll = random.random()
         hit_threshold = (move["accuracy"] / 100.0) * (1.0 - dodge_bonus)
@@ -2743,6 +2716,7 @@ async def battle(ctx, opponent: discord.Member):
                 hp2 -= dmg
             else:
                 hp1 -= dmg
+
             crit_txt = " **(CRIT!)**" if crit else ""
             await safe_send(
                 channel,
@@ -2771,59 +2745,48 @@ async def battle(ctx, opponent: discord.Member):
         del ACTIVE_BATTLE[ctx.guild.id]
 
 # ==========================
-# --- Global error handler ---
-# ==========================
-@bot.event
-async def on_command_error(ctx, error):
-    if isinstance(error, commands.CommandOnCooldown):
-        await safe_send(ctx, f"⏳ Slow down! Try again in {error.retry_after:.1f}s.")
-        return
-    if isinstance(error, commands.CommandNotFound):
-        return
-    if isinstance(error, commands.BadArgument):
-        await safe_send(ctx, "❌ Bad argument. Check `!commands`.")
-        return
-    orig = getattr(error, "original", error)
-    if isinstance(orig, discord.HTTPException) and getattr(orig, "status", None) == 429:
-        logger.warning("Suppressed a 429 from a command send.")
-        return
-    logger.exception("Command error:", exc_info=error)
-    try:
-        await safe_send(ctx, "⚠️ An error occurred while processing your command.")
-    except:
-        pass
-
-# ==========================
 # --- Flask keep-alive   ---
 # ==========================
 keep_alive()
 
 # ==========================
-# --- Runner avec backoff ---
+# --- Boot avec backoff  ---
 # ==========================
-async def run_bot_forever():
-    """
-    Evite le crash au login (Cloudflare 1015 / 429). Retente avec backoff.
-    """
-    backoff = 30
-    max_backoff = 600  # 10 min
+async def run_bot():
+    if not TOKEN:
+        print("❌ ERROR: DISCORD_TOKEN is not set. Configure it in Render → Environment.", flush=True)
+        sys.exit(1)
+    # Si token invalide, on ne boucle pas éternellement
+    from discord.errors import LoginFailure, HTTPException
+    backoff = 5
     while True:
         try:
             await bot.start(TOKEN)
-        except discord.HTTPException as e:
-            status = getattr(e, "status", None)
-            if status == 429:
-                print(f"⚠️ Login rate-limited by Cloudflare (429). Retry in {backoff}s...")
+        except LoginFailure as e:
+            print("❌ LoginFailure: invalid DISCORD_TOKEN. Check the token in Render.", flush=True)
+            sys.exit(1)
+        except HTTPException as e:
+            # Cloudflare 429 côté gateway/API → on backoff
+            if e.status == 429:
+                print(f"⚠️ HTTP 429 at login/start. Retrying in {backoff}s...", flush=True)
                 await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, max_backoff)
+                backoff = min(backoff * 2, 300)
                 continue
             else:
-                print(f"HTTPException on login: {e} — retry in 20s")
-                await asyncio.sleep(20)
+                print(f"⚠️ HTTPException {e.status}: {e}. Retrying in {backoff}s...", flush=True)
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 300)
                 continue
         except Exception as e:
-            print(f"Bot crashed on startup: {e} — retry in 20s")
-            await asyncio.sleep(20)
+            print(f"Bot crashed unexpectedly: {e}", flush=True)
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 300)
             continue
-        else:
-            break  # bot.stop() a été appelé
+        break
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(run_bot())
+    except KeyboardInterrupt:
+        print("Shutting down...")
+
