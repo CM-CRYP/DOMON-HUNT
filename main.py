@@ -1,3 +1,4 @@
+# main.py
 import os
 import json
 import unicodedata
@@ -100,10 +101,11 @@ def home():
     return "MYIKKI Domon Bot is running!"
 
 def run():
+    # Serveur keep-alive (utile si tu as un healthcheck Render)
     app.run(host='0.0.0.0', port=8080)
 
 def keep_alive():
-    t = Thread(target=run)
+    t = Thread(target=run, daemon=True)
     t.start()
 
 # =============================
@@ -111,8 +113,15 @@ def keep_alive():
 # =============================
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
-# Fallback à ton ID si OWNER_ID n'est pas défini dans l'env
-OWNER_ID = (os.getenv("OWNER_ID") or "865185894197887018").strip()
+OWNER_ID = (os.getenv("OWNER_ID") or "865185894197887018").strip()  # mets ton ID si besoin
+
+# -------- Logger (réduit le bruit) --------
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("domonbot")
+logging.getLogger("discord.client").setLevel(logging.WARNING)
+logging.getLogger("discord.gateway").setLevel(logging.WARNING)
+logging.getLogger("discord.http").setLevel(logging.WARNING)
+logging.getLogger("werkzeug").setLevel(logging.ERROR)
 
 intents = discord.Intents.default()
 intents.messages = True
@@ -121,13 +130,6 @@ intents.guilds = True
 intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
-
-# -------- Logger (réduit le bruit & 429) --------
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("domonbot")
-logging.getLogger("discord.client").setLevel(logging.WARNING)
-logging.getLogger("discord.gateway").setLevel(logging.WARNING)
-logging.getLogger("discord.http").setLevel(logging.WARNING)
 
 SAVE_FILE = "players.json"
 CONFIG_FILE = "config.json"
@@ -146,23 +148,22 @@ _message_queue = asyncio.Queue()
 _message_worker_started = False
 
 async def _message_worker():
-    # Cadence globale: 1 msg ~ /1.2s
+    # cadence globale pour limiter les 429 REST en rafale
     while True:
         channel, send_kwargs = await _message_queue.get()
         try:
             await channel.send(**send_kwargs)
             await asyncio.sleep(1.2)
         except HTTPException as e:
-            if e.status == 429:
-                logger.warning("Rate limited (429) on send → backoff")
-                # backoff exponentiel simple
-                for delay in (2, 4, 8, 16):
+            if getattr(e, "status", None) == 429:
+                logger.warning("Rate limited (429) on send → backoff retries")
+                for delay in (2, 4, 8, 16, 32):
                     try:
                         await asyncio.sleep(delay)
                         await channel.send(**send_kwargs)
                         break
                     except HTTPException as e2:
-                        if e2.status != 429:
+                        if getattr(e2, "status", None) != 429:
                             raise
                 else:
                     logger.error("Abandon message after multiple 429.")
@@ -176,13 +177,13 @@ async def _message_worker():
 def _ensure_worker():
     global _message_worker_started
     if not _message_worker_started:
-        bot.loop.create_task(_message_worker())
+        asyncio.create_task(_message_worker())
         _message_worker_started = True
 
 async def safe_send(target, content: str = None, embed=None, **kwargs):
     """
-    Utilise TOUJOURS safe_send(...) à la place de ctx.send / channel.send.
-    target peut être un ctx ou un channel (TextChannel / Thread / DMChannel).
+    Utilise TOUJOURS safe_send(...) pour les messages sans View.
+    target peut être un ctx ou un channel.
     """
     _ensure_worker()
     channel = target.channel if hasattr(target, "channel") else target
@@ -196,7 +197,6 @@ async def safe_send(target, content: str = None, embed=None, **kwargs):
 
 # --------- Helpers encodage / temps ----------
 def normalize_str(s: str) -> str:
-    """Supprime accents/diacritiques pour comparaisons robustes."""
     if not isinstance(s, str):
         return s
     return unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii").strip().lower()
@@ -221,7 +221,7 @@ def load_state():
         "scan_claimed": None,
         "capture_attempted": None,
         "scan_timer_started": None,
-        "bimnet_until": None  # ISO string
+        "bimnet_until": None
     }
 
 def save_state(state):
@@ -1988,6 +1988,7 @@ DOMON_LIST = [
         ]
     }
     ]
+
 # ======================
 # --- Game Constants ---
 # ======================
@@ -2001,8 +2002,8 @@ DAILY_REWARDS = {
     ]
 }
 
-BASE_SPAWN_CHANCE = 0.60  # sans BIMNet
-BIMNET_SPAWN_CHANCE = 1.00  # avec BIMNet
+BASE_SPAWN_CHANCE = 0.60
+BIMNET_SPAWN_CHANCE = 1.00
 
 # =========================
 # --- Helper / UI bits  ---
@@ -2059,7 +2060,6 @@ async def timeout_scan(ctx):
 # --- Patch collections with fresh stats ---
 # =========================================
 def patch_collections_with_stats(players, domon_list):
-    # dictionnaire par nom normalisé, mais on garde l'affichage original
     name2domon = {normalize_str(d['name']): d for d in domon_list}
     updated = 0
     for player in players.values():
@@ -2092,7 +2092,7 @@ print("Player and config data loaded.")
 spawn_in_progress = asyncio.Lock()
 
 async def spawn_random_domon(channel):
-    """Spawn sécurisé (anti-double, 1 seul message, via safe_send)."""
+    """Spawn sécurisé (anti-double, 1 seul message)."""
     if spawn_in_progress.locked():
         return
     async with spawn_in_progress:
@@ -2278,10 +2278,8 @@ async def domon_info(ctx, *, name_or_num: str):
         await safe_send(ctx, "Bot is still initializing. Try again in a few seconds!")
         return
     domon = None
-    # recherche par numéro
     if name_or_num.isdigit():
         domon = next((d for d in DOMON_LIST if str(d["num"]) == name_or_num), None)
-    # sinon par nom (normalisé accents)
     if not domon:
         key = normalize_str(name_or_num)
         domon = next((d for d in DOMON_LIST if normalize_str(d["name"]) == key), None)
@@ -2311,7 +2309,6 @@ async def use_item(ctx, *, item_name: str):
         return
     inv = player["inventory"]
     normalized = item_name.strip().replace(" ", "").lower()
-    # normalisations souples
     aliases = {
         "perfectdomoball": "PerfectDomoball",
         "perfectball": "PerfectDomoball",
@@ -2324,7 +2321,6 @@ async def use_item(ctx, *, item_name: str):
         "bimnet": "BIMNet",
     }
     canonical = aliases.get(normalized, item_name.strip())
-    # compatibilité casse
     key = None
     for k in list(inv.keys()):
         if normalize_str(k) == normalize_str(canonical):
@@ -2388,12 +2384,9 @@ async def spawn_task():
     s = load_state()
     if not bot_ready or s["active_spawn"] or not config.get("spawn_channel_id"):
         return
-
-    # Chance de spawn modulée par BIMNet
     chance = BIMNET_SPAWN_CHANCE if is_bimnet_active() else BASE_SPAWN_CHANCE
     if random.random() > chance:
         return
-
     channel = bot.get_channel(config["spawn_channel_id"])
     if channel:
         await spawn_random_domon(channel)
@@ -2476,7 +2469,6 @@ async def capture(ctx):
             fail_capture()
             return
 
-        # PERFECT: succès garanti
         if has_perfect:
             player["inventory"]["PerfectDomoball"] -= 1
             if player["inventory"]["PerfectDomoball"] == 0:
@@ -2500,7 +2492,6 @@ async def capture(ctx):
             success_capture()
             return
 
-        # REGULAR capture (avec SpectraSeal reroll)
         rates = {"Common": 0.90, "Uncommon": 0.65, "Rare": 0.30, "Legendary": 0.10}
         base_success = rates.get(domon["rarity"], 0.5)
 
@@ -2508,10 +2499,8 @@ async def capture(ctx):
         if player["inventory"]["Domoball"] == 0:
             del player["inventory"]["Domoball"]
 
-        # premier jet
         success = random.random() < base_success
 
-        # Reroll si SpectraSeal actif et échec
         if not success and player.get("flags", {}).get("spectraseal_reroll"):
             success = random.random() < base_success
             player["flags"]["spectraseal_reroll"] = False
@@ -2548,13 +2537,11 @@ async def capture(ctx):
 
 @bot.command(name="forcespawn")
 async def forcespawn(ctx):
-    # Ultra strict : si OWNER_ID pas défini correctement, personne d'autre ne peut
     if str(ctx.author.id) != str(OWNER_ID):
         await safe_send(ctx, "❌ Only the bot owner can use this command.")
         return
     clear_spawn()
     await spawn_random_domon(ctx.channel)
-    # Ajout d'un tag admin dans l'embed via le titre de spawn_random_domon déjà explicite
 
 def check_evolution(user_id):
     player = players[user_id]
@@ -2563,7 +2550,6 @@ def check_evolution(user_id):
     counts = {}
     for domon in collection:
         counts[domon["name"]] = counts.get(domon["name"], 0) + 1
-    # évolue si on a 3 fois le même de base (simple)
     for domon in DOMON_LIST:
         if domon.get("evolution") and domon["evolution"] not in evolved_names:
             base_name = domon["name"]
@@ -2583,7 +2569,7 @@ def check_evolution(user_id):
 # =========================
 from discord.ui import View, Button, Select
 
-ACTIVE_BATTLE = {}  # {guild_id: (player1_id, player2_id)}
+ACTIVE_BATTLE = {}
 BATTLE_TIMEOUT = 60
 
 def get_player_domons(user_id):
@@ -2705,13 +2691,8 @@ async def battle(ctx, opponent: discord.Member):
     hp1 = max_hp1
     hp2 = max_hp2
 
-    # simple buff trackers — DEF ↑ pendant 2 tours
-    buffs = {
-        "p1_def_up": 0,
-        "p2_def_up": 0
-    }
-
-    turn = 0  # 0 = player1, 1 = player2
+    buffs = {"p1_def_up": 0, "p2_def_up": 0}
+    turn = 0
 
     while hp1 > 0 and hp2 > 0:
         active, defending = (ctx.author, opponent) if turn == 0 else (opponent, ctx.author)
@@ -2721,22 +2702,14 @@ async def battle(ctx, opponent: discord.Member):
         a_stats = a_domon["stats"].copy()
         d_stats = d_domon["stats"].copy()
 
-        # apply def buffs
         if turn == 0 and buffs["p2_def_up"] > 0:
             d_stats["def"] = int(d_stats["def"] * 1.5)
         if turn == 1 and buffs["p1_def_up"] > 0:
             d_stats["def"] = int(d_stats["def"] * 1.5)
 
-        allowed = active.id
-        atk_view = AttackView(a_domon, allowed_user_id=allowed)
-        atk_msg = await safe_send(
-            channel,
-            f"{active.mention}'s turn! (**{a_domon['name']}**, {hp1 if turn==0 else hp2} HP)\n"
-            f"{defending.display_name}'s {d_domon['name']} HP: `{hp_bar(hp2 if turn==0 else hp1, max_hp2 if turn==0 else max_hp1)}`",
-            view=atk_view,
-        )
-        # safe_send ne renvoie pas le message; on a besoin du View actif, donc on envoie le composant directement :
-        msg_with_view = await channel.send(
+        # Ici on doit obtenir un objet Message pour attacher la View, donc envoi direct (pas safe_send)
+        atk_view = AttackView(a_domon, allowed_user_id=active.id)
+        await channel.send(
             f"{active.mention}'s turn! (**{a_domon['name']}**, {hp1 if turn==0 else hp2} HP)\n"
             f"{defending.display_name}'s {d_domon['name']} HP: `{hp_bar(hp2 if turn==0 else hp1, max_hp2 if turn==0 else max_hp1)}`",
             view=atk_view,
@@ -2745,7 +2718,6 @@ async def battle(ctx, opponent: discord.Member):
 
         if atk_view.chosen is None:
             await safe_send(channel, f"⏳ {active.display_name} didn't choose an attack in time! Turn skipped.")
-            # decay buffs
             if buffs["p1_def_up"] > 0: buffs["p1_def_up"] -= 1
             if buffs["p2_def_up"] > 0: buffs["p2_def_up"] -= 1
             turn = 1 - turn
@@ -2753,15 +2725,12 @@ async def battle(ctx, opponent: discord.Member):
             continue
 
         move = a_domon["moves"][int(atk_view.chosen)]
-
-        # MISS check (accuracy) + dodge bonus by speed
-        dodge_bonus = max(0.0, (d_stats["spd"] - a_stats["spd"]) * 0.005)  # 0.5% par point de spd d'écart
+        dodge_bonus = max(0.0, (d_stats["spd"] - a_stats["spd"]) * 0.005)
         hit_roll = random.random()
         hit_threshold = (move["accuracy"] / 100.0) * (1.0 - dodge_bonus)
         hit = hit_roll < hit_threshold
 
         if move["power"] == 0:
-            # Tous les moves de soutien => DEF ↑ 2 tours
             if turn == 0:
                 buffs["p1_def_up"] = 2
             else:
@@ -2774,7 +2743,6 @@ async def battle(ctx, opponent: discord.Member):
                 hp2 -= dmg
             else:
                 hp1 -= dmg
-
             crit_txt = " **(CRIT!)**" if crit else ""
             await safe_send(
                 channel,
@@ -2785,7 +2753,6 @@ async def battle(ctx, opponent: discord.Member):
         else:
             await safe_send(channel, f"😬 {active.display_name}'s **{move['name']}** missed!")
 
-        # decay buffs
         if buffs["p1_def_up"] > 0: buffs["p1_def_up"] -= 1
         if buffs["p2_def_up"] > 0: buffs["p2_def_up"] -= 1
 
@@ -2808,7 +2775,6 @@ async def battle(ctx, opponent: discord.Member):
 # ==========================
 @bot.event
 async def on_command_error(ctx, error):
-    # évite les gros pavés de logs et répond de façon propre
     if isinstance(error, commands.CommandOnCooldown):
         await safe_send(ctx, f"⏳ Slow down! Try again in {error.retry_after:.1f}s.")
         return
@@ -2817,13 +2783,10 @@ async def on_command_error(ctx, error):
     if isinstance(error, commands.BadArgument):
         await safe_send(ctx, "❌ Bad argument. Check `!commands`.")
         return
-    # déballer l'erreur originale
     orig = getattr(error, "original", error)
     if isinstance(orig, discord.HTTPException) and getattr(orig, "status", None) == 429:
-        # on ignore silencieusement les 429 (Cloudflare HTML)
         logger.warning("Suppressed a 429 from a command send.")
         return
-    # log minimal et message générique
     logger.exception("Command error:", exc_info=error)
     try:
         await safe_send(ctx, "⚠️ An error occurred while processing your command.")
@@ -2835,8 +2798,32 @@ async def on_command_error(ctx, error):
 # ==========================
 keep_alive()
 
-if __name__ == "__main__":
-    try:
-        bot.run(TOKEN)
-    except Exception as e:
-        print(f"Bot crashed: {e}")
+# ==========================
+# --- Runner avec backoff ---
+# ==========================
+async def run_bot_forever():
+    """
+    Evite le crash au login (Cloudflare 1015 / 429). Retente avec backoff.
+    """
+    backoff = 30
+    max_backoff = 600  # 10 min
+    while True:
+        try:
+            await bot.start(TOKEN)
+        except discord.HTTPException as e:
+            status = getattr(e, "status", None)
+            if status == 429:
+                print(f"⚠️ Login rate-limited by Cloudflare (429). Retry in {backoff}s...")
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, max_backoff)
+                continue
+            else:
+                print(f"HTTPException on login: {e} — retry in 20s")
+                await asyncio.sleep(20)
+                continue
+        except Exception as e:
+            print(f"Bot crashed on startup: {e} — retry in 20s")
+            await asyncio.sleep(20)
+            continue
+        else:
+            break  # bot.stop() a été appelé
