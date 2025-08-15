@@ -1,7 +1,5 @@
 import os
-import sys
 import json
-import time
 import unicodedata
 import discord
 import random
@@ -14,21 +12,16 @@ from datetime import datetime, timezone, timedelta
 import pytz
 import requests
 
-# =============================
-# ======  CONFIG GLOBAL  ======
-# =============================
+# =========================
+# --- Config / ENV     ---
+# =========================
 load_dotenv()
-
 TOKEN = os.getenv("DISCORD_TOKEN")
-# Fallback sur ton ID si OWNER_ID n'est pas défini côté Render
-OWNER_ID = str(os.getenv("OWNER_ID", "865185894197887018"))
+# Fallback sur TON ID si la variable d'env n'est pas posée
+OWNER_ID = str(os.getenv("OWNER_ID", "865185894197887018")).strip()
 
-SAVE_FILE = "players.json"
-CONFIG_FILE = "config.json"
-STATE_FILE = "state.json"
-
-# PORT rendu dispo par Render pour un Web Service
-PORT = int(os.getenv("PORT", "8080"))
+# Active le mini serveur web seulement en Web Service Render
+ENABLE_WEB = os.getenv("ENABLE_WEB", "1") == "1"
 
 # =========================
 # --- Dropbox config v2 ---
@@ -49,21 +42,21 @@ def get_dropbox_access_token():
     try:
         resp = requests.post(url, data=data, timeout=15)
     except Exception as e:
-        print("❌ Dropbox refresh error:", e, flush=True)
+        print("❌ Dropbox refresh error:", e)
         return None
     if resp.status_code == 200:
         return resp.json().get("access_token")
     else:
-        print("❌ Dropbox refresh error:", resp.text, flush=True)
+        print("❌ Dropbox refresh error:", resp.text)
         return None
 
 def upload_players_dropbox():
     access_token = get_dropbox_access_token()
     if not access_token:
-        print("❌ No Dropbox access token, can't upload.", flush=True)
+        print("❌ No Dropbox access token, can't upload.")
         return
     if not os.path.exists("players.json"):
-        print("ℹ️ No players.json to upload yet.", flush=True)
+        print("ℹ️ No players.json to upload yet.")
         return
     with open("players.json", "rb") as f:
         data = f.read()
@@ -79,17 +72,17 @@ def upload_players_dropbox():
     try:
         resp = requests.post("https://content.dropboxapi.com/2/files/upload", headers=headers, data=data, timeout=20)
     except Exception as e:
-        print("❌ Failed to upload players.json:", e, flush=True)
+        print("❌ Failed to upload players.json:", e)
         return
     if resp.status_code == 200:
-        print("☁️ players.json uploaded to Dropbox.", flush=True)
+        print("☁️ players.json uploaded to Dropbox.")
     else:
-        print("❌ Failed to upload players.json:", resp.text, flush=True)
+        print("❌ Failed to upload players.json:", resp.text)
 
 def download_players_dropbox():
     access_token = get_dropbox_access_token()
     if not access_token:
-        print("❌ No Dropbox access token, can't download.", flush=True)
+        print("❌ No Dropbox access token, can't download.")
         return
     headers = {
         "Authorization": f"Bearer {access_token}",
@@ -98,14 +91,14 @@ def download_players_dropbox():
     try:
         resp = requests.post("https://content.dropboxapi.com/2/files/download", headers=headers, timeout=20)
     except Exception as e:
-        print("❌ Dropbox download error:", e, flush=True)
+        print("❌ Dropbox download error:", e)
         return
     if resp.status_code == 200:
         with open("players.json", "wb") as f:
             f.write(resp.content)
-        print("✅ players.json downloaded from Dropbox.", flush=True)
+        print("✅ players.json downloaded from Dropbox.")
     else:
-        print("🆕 No players.json found on Dropbox. Will create new one on first save.", flush=True)
+        print("🆕 No players.json found on Dropbox. Will create new one on first save.")
 
 # ==============================
 # --- Keep-alive Flask server ---
@@ -116,12 +109,13 @@ app = Flask('')
 def home():
     return "MYIKKI Domon Bot is running!"
 
-def run():
-    # Bind sur le PORT Render si Web Service
-    app.run(host='0.0.0.0', port=PORT)
+def run_web():
+    # Render impose d'écouter sur $PORT
+    port = int(os.getenv("PORT", "10000"))
+    app.run(host='0.0.0.0', port=port, threaded=True)
 
 def keep_alive():
-    t = Thread(target=run, daemon=True)
+    t = Thread(target=run_web, daemon=True)
     t.start()
 
 # =============================
@@ -131,17 +125,18 @@ intents = discord.Intents.default()
 intents.messages = True
 intents.message_content = True
 intents.guilds = True
-intents.members = True
+intents.members = True  # utile pour le converter Member dans !battle
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+SAVE_FILE = "players.json"
+CONFIG_FILE = "config.json"
+STATE_FILE = "state.json"
 players = None
 config = None
 
 scan_lock = asyncio.Lock()
-spawn_lock = asyncio.Lock()
 scan_timer_task = None
-last_forcespawn_ts = 0.0  # pour éviter le double message après !forcespawn
 
 # --------- Helpers encodage / temps ----------
 def normalize_str(s: str) -> str:
@@ -195,7 +190,6 @@ def get_current_domon():
     return None
 
 def set_spawned_domon(domon):
-    # MAJ atomique sans passer par clear_spawn() pour éviter une fenêtre race
     state = load_state()
     state.update({
         "active_spawn": True,
@@ -258,10 +252,14 @@ def load_players():
             return json.load(f)
     return {}
 
-def save_players(players):
+def save_players(players_obj):
     with open(SAVE_FILE, "w", encoding="utf-8") as f:
-        json.dump(players, f, ensure_ascii=False, indent=2)
-    upload_players_dropbox()
+        json.dump(players_obj, f, ensure_ascii=False, indent=2)
+    # Upload (best-effort)
+    try:
+        upload_players_dropbox()
+    except Exception as e:
+        print("⚠️ Dropbox upload skipped:", e)
 
 def load_config():
     if os.path.exists(CONFIG_FILE):
@@ -269,9 +267,9 @@ def load_config():
             return json.load(f)
     return {"spawn_channel_id": None}
 
-def save_config(config):
+def save_config(cfg):
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump(config, f, ensure_ascii=False, indent=2)
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
 
 # ------- Liste des 151 DOMON (évolutions incluses) -------
 DOMON_LIST = [
@@ -1981,27 +1979,13 @@ def hp_bar(hp, max_hp, width=20):
 # =========
 bot_ready = False
 
-async def safe_send(dest, *args, retries=3, **kwargs):
-    """Envoi avec backoff si 429 (Cloudflare/API)."""
-    for attempt in range(retries):
-        try:
-            if isinstance(dest, commands.Context):
-                return await dest.send(*args, **kwargs)
-            else:
-                return await dest.send(*args, **kwargs)
-        except discord.HTTPException as e:
-            if e.status == 429 and attempt < retries - 1:
-                delay = 2 ** attempt + random.random()
-                await asyncio.sleep(delay)
-                continue
-            raise
-
 @bot.event
 async def on_ready():
     global bot_ready
-    print(f"Bot ready as {bot.user}!", flush=True)
+    print(f"Bot ready as {bot.user}!")
     await asyncio.sleep(1)
     bot_ready = True
+    # Evite l'exception “loop already running”
     if not spawn_task.is_running():
         spawn_task.start()
 
@@ -2013,16 +1997,16 @@ async def timeout_scan(ctx):
     await asyncio.sleep(120)
     if is_scan_expired():
         scan_expired()
-        await safe_send(ctx, "⏰ Time's up! The DOMON was not captured. Anyone can !scan again.")
+        await ctx.send("⏰ Time's up! The DOMON was not captured. Anyone can !scan again.")
     scan_timer_task = None
 
 # =========================================
 # --- Patch collections with fresh stats ---
 # =========================================
-def patch_collections_with_stats(players, domon_list):
+def patch_collections_with_stats(players_obj, domon_list):
     name2domon = {normalize_str(d['name']): d for d in domon_list}
     updated = 0
-    for player in players.values():
+    for player in players_obj.values():
         collection = player.get("collection", [])
         for d in collection:
             ref = name2domon.get(normalize_str(d.get("name", "")))
@@ -2032,7 +2016,7 @@ def patch_collections_with_stats(players, domon_list):
                 updated += 1
     return updated
 
-print("Downloading player data from Dropbox (startup)...", flush=True)
+print("Downloading player data from Dropbox (startup)...")
 download_players_dropbox()
 players = load_players()
 config = load_config()
@@ -2040,27 +2024,27 @@ config = load_config()
 nb = patch_collections_with_stats(players, DOMON_LIST)
 if nb > 0:
     save_players(players)
-    print(f"✅ PATCH collections: {nb} DOMON(s) mis à jour avec stats/moves.", flush=True)
+    print(f"✅ PATCH collections: {nb} DOMON(s) mis à jour avec stats/moves.")
 else:
-    print("✅ PATCH collections: aucun DOMON à mettre à jour ou déjà au bon format.", flush=True)
+    print("✅ PATCH collections: aucun DOMON à mettre à jour ou déjà au bon format.")
 
-print("Player and config data loaded.", flush=True)
-
-# ============
-#  CHECKS
-# ============
-def is_owner_user(ctx):
-    return str(ctx.author.id) == OWNER_ID
-
-owner_only = commands.check(is_owner_user)
+print("Player and config data loaded.")
 
 # ===============
 #  COMMANDS
 # ===============
+def owner_only():
+    async def predicate(ctx):
+        if str(ctx.author.id) != str(OWNER_ID):
+            await ctx.send("❌ Only the bot owner can use this command.")
+            return False
+        return True
+    return commands.check(predicate)
+
 @bot.command(name="commands")
 async def commands_cmd(ctx):
     if not_ready(ctx):
-        await safe_send(ctx, "Bot is still initializing. Try again in a few seconds!")
+        await ctx.send("Bot is still initializing. Try again in a few seconds!")
         return
     embed = discord.Embed(title="MYIKKI DOMON Commands", color=0x82eefd)
     embed.description = """
@@ -2077,36 +2061,36 @@ async def commands_cmd(ctx):
 **!setspawn** : (Owner) Set current channel for DOMON spawns  
 **!forcespawn** : (Owner) Force a DOMON to appear  
     """
-    await safe_send(ctx, embed=embed)
+    await ctx.send(embed=embed)
 
 @bot.command(name="setspawn")
-@owner_only
+@owner_only()
 async def set_spawn_channel(ctx):
     if not_ready(ctx):
-        await safe_send(ctx, "Bot is still initializing. Try again in a few seconds!")
+        await ctx.send("Bot is still initializing. Try again in a few seconds!")
         return
     config["spawn_channel_id"] = ctx.channel.id
     save_config(config)
-    await safe_send(ctx, "✅ This channel is now the official DOMON spawn point!")
+    await ctx.send("✅ This channel is now the official DOMON spawn point!")
 
 @bot.command(name="addballs")
-@owner_only
+@owner_only()
 async def addballs(ctx, amount: int):
     if not_ready(ctx):
-        await safe_send(ctx, "Bot is still initializing. Try again in a few seconds!")
+        await ctx.send("Bot is still initializing. Try again in a few seconds!")
         return
     user_id = str(ctx.author.id)
     if user_id not in players:
-        await safe_send(ctx, "Start the game first with !start")
+        await ctx.send("Start the game first with !start")
         return
     players[user_id]["inventory"]["Domoball"] = players[user_id]["inventory"].get("Domoball", 0) + amount
     save_players(players)
-    await safe_send(ctx, f"✅ You received {amount} Domoballs.")
+    await ctx.send(f"✅ You received {amount} Domoballs.")
 
 @bot.command(name="start")
 async def start_game(ctx):
     if not_ready(ctx):
-        await safe_send(ctx, "Bot is still initializing. Try again in a few seconds!")
+        await ctx.send("Bot is still initializing. Try again in a few seconds!")
         return
     user_id = str(ctx.author.id)
     if user_id not in players:
@@ -2123,25 +2107,25 @@ async def start_game(ctx):
             }
         }
         save_players(players)
-        await safe_send(ctx, f"{ctx.author.mention} Welcome to **MYIKKI DOMON HUNT**!\nYou receive: 5 Domoballs and 1 Scan Tool! Type !inventory to see your items.")
+        await ctx.send(f"{ctx.author.mention} Welcome to **MYIKKI DOMON HUNT**!\nYou receive: 5 Domoballs and 1 Scan Tool! Type !inventory to see your items.")
     else:
-        await safe_send(ctx, "You already have an account! Use !inventory.")
+        await ctx.send("You already have an account! Use !inventory.")
 
 @bot.command(name="daily")
 @commands.cooldown(1, 5, commands.BucketType.user)
 async def daily(ctx):
     if not_ready(ctx):
-        await safe_send(ctx, "Bot is still initializing. Try again in a few seconds!")
+        await ctx.send("Bot is still initializing. Try again in a few seconds!")
         return
     tz = pytz.timezone("Europe/Paris")
     now = datetime.now(tz).date()
     user_id = str(ctx.author.id)
     player = players.get(user_id)
     if not player:
-        await safe_send(ctx, "Type !start to begin your hunt!")
+        await ctx.send("Type !start to begin your hunt!")
         return
     if player["daily"] == str(now):
-        await safe_send(ctx, f"🕒 {ctx.author.mention} you already claimed your daily reward today!\n(6 Domoballs + 1 bonus item every 24h)")
+        await ctx.send(f"🕒 {ctx.author.mention} you already claimed your daily reward today!\n(6 Domoballs + 1 bonus item every 24h)")
         return
     player["daily"] = str(now)
     player["inventory"]["Domoball"] = player["inventory"].get("Domoball", 0) + DAILY_REWARDS["Domoball"]
@@ -2152,19 +2136,19 @@ async def daily(ctx):
     player["inventory"][bonus] = player["inventory"].get(bonus, 0) + 1
     save_players(players)
     if bonus == "PerfectDomoball":
-        await safe_send(ctx, f"{ctx.author.mention} received 6 Domoballs and... 🟣 **A PERFECTDOMOBALL!** Ultra-rare! (1% drop rate!)")
+        await ctx.send(f"{ctx.author.mention} received 6 Domoballs and... 🟣 **A PERFECTDOMOBALL!** Ultra-rare! (1% drop rate!)")
     else:
-        await safe_send(ctx, f"{ctx.author.mention} received 6 Domoballs and 1 bonus item: **{bonus}**! See you tomorrow!")
+        await ctx.send(f"{ctx.author.mention} received 6 Domoballs and 1 bonus item: **{bonus}**! See you tomorrow!")
 
 @bot.command(name="inventory")
 async def inventory(ctx):
     if not_ready(ctx):
-        await safe_send(ctx, "Bot is still initializing. Try again in a few seconds!")
+        await ctx.send("Bot is still initializing. Try again in a few seconds!")
         return
     user_id = str(ctx.author.id)
     player = players.get(user_id)
     if not player:
-        await safe_send(ctx, "Type !start to begin your hunt!")
+        await ctx.send("Type !start to begin your hunt!")
         return
     embed = discord.Embed(title=f"{ctx.author.display_name}'s Inventory", color=0xFFD700)
     for k, v in player["inventory"].items():
@@ -2172,52 +2156,50 @@ async def inventory(ctx):
     flags = player.get("flags", {})
     if any(flags.values()):
         embed.add_field(name="Active Effects", value=", ".join([k for k, v in flags.items() if v]), inline=False)
-    await safe_send(ctx, embed=embed)
+    await ctx.send(embed=embed)
 
 @bot.command(name="collection")
 async def collection(ctx):
     if not_ready(ctx):
-        await safe_send(ctx, "Bot is still initializing. Try again in a few seconds!")
+        await ctx.send("Bot is still initializing. Try again in a few seconds!")
         return
     user_id = str(ctx.author.id)
     player = players.get(user_id)
     if not player:
-        await safe_send(ctx, "Type !start to begin your hunt!")
+        await ctx.send("Type !start to begin your hunt!")
         return
     if not player["collection"]:
-        await safe_send(ctx, "You haven't captured any DOMON yet!")
+        await ctx.send("You haven't captured any DOMON yet!")
         return
     embed = discord.Embed(title=f"{ctx.author.display_name}'s Domon Collection", color=0x7DF9FF)
     txt = ""
     for d in player["collection"]:
         txt += f"#{d['num']:03d} {d['name']} ({d['rarity']})\n"
     embed.description = txt[:4000]
-    await safe_send(ctx, embed=embed)
+    await ctx.send(embed=embed)
 
 @bot.command(name="domodex")
 async def domodex(ctx):
     if not_ready(ctx):
-        await safe_send(ctx, "Bot is still initializing. Try again in a few seconds!")
+        await ctx.send("Bot is still initializing. Try again in a few seconds!")
         return
     lines = [f"#{d['num']:03d} {d['name']} ({d['type']}, {d['rarity']})" for d in DOMON_LIST]
-    chunks = []
-    block = ""
+    chunks, block = [], ""
     for line in lines:
         if len(block) + len(line) + 1 > 3800:
-            chunks.append(block)
-            block = ""
+            chunks.append(block); block = ""
         block += line + "\n"
     if block:
         chunks.append(block)
     for i, chunk in enumerate(chunks, 1):
         embed = discord.Embed(title=f"DOMODEX – Complete List (page {i}/{len(chunks)})", color=0x6e34ff)
         embed.description = chunk
-        await safe_send(ctx, embed=embed)
+        await ctx.send(embed=embed)
 
 @bot.command(name="info")
 async def domon_info(ctx, *, name_or_num: str):
     if not_ready(ctx):
-        await safe_send(ctx, "Bot is still initializing. Try again in a few seconds!")
+        await ctx.send("Bot is still initializing. Try again in a few seconds!")
         return
     domon = None
     if name_or_num.isdigit():
@@ -2226,7 +2208,7 @@ async def domon_info(ctx, *, name_or_num: str):
         key = normalize_str(name_or_num)
         domon = next((d for d in DOMON_LIST if normalize_str(d["name"]) == key), None)
     if not domon:
-        await safe_send(ctx, "Unknown DOMON.")
+        await ctx.send("Unknown DOMON.")
         return
     embed = discord.Embed(title=f"DOMODEX #{domon['num']:03d} — {domon['name']}", color=0x8effa2)
     embed.add_field(name="Type", value=domon['type'])
@@ -2234,7 +2216,7 @@ async def domon_info(ctx, *, name_or_num: str):
     if domon.get("evolution"):
         embed.add_field(name="Evolution", value=domon['evolution'])
     embed.add_field(name="Description", value=domon['description'], inline=False)
-    await safe_send(ctx, embed=embed)
+    await ctx.send(embed=embed)
 
 # ==========================
 # --- ITEMS: real effects ---
@@ -2242,12 +2224,12 @@ async def domon_info(ctx, *, name_or_num: str):
 @bot.command(name="use")
 async def use_item(ctx, *, item_name: str):
     if not_ready(ctx):
-        await safe_send(ctx, "Bot is still initializing. Try again in a few seconds!")
+        await ctx.send("Bot is still initializing. Try again in a few seconds!")
         return
     user_id = str(ctx.author.id)
     player = players.get(user_id)
     if not player:
-        await safe_send(ctx, "Type !start to begin your hunt!")
+        await ctx.send("Type !start to begin your hunt!")
         return
     inv = player["inventory"]
     normalized = item_name.strip().replace(" ", "").lower()
@@ -2269,7 +2251,7 @@ async def use_item(ctx, *, item_name: str):
             key = k
             break
     if key is None or inv.get(key, 0) <= 0:
-        await safe_send(ctx, f"You don't have any **{canonical}**.")
+        await ctx.send(f"You don't have any **{canonical}**.")
         return
 
     msg = None
@@ -2316,20 +2298,16 @@ async def use_item(ctx, *, item_name: str):
             del inv[key]
 
     save_players(players)
-    await safe_send(ctx, msg)
+    await ctx.send(msg)
 
 # ==========================
 # --- Spawns (loop)      ---
 # ==========================
 @tasks.loop(minutes=5)
 async def spawn_task():
-    async with spawn_lock:
+    async with scan_lock:
         s = load_state()
         if not bot_ready or s["active_spawn"] or not config.get("spawn_channel_id"):
-            return
-
-        # éviter un spawn juste après un !forcespawn (fenêtre très courte)
-        if time.monotonic() - last_forcespawn_ts < 3.0:
             return
 
         chance = BIMNET_SPAWN_CHANCE if is_bimnet_active() else BASE_SPAWN_CHANCE
@@ -2346,11 +2324,7 @@ async def spawn_task():
             embed.add_field(name="Rarity", value=domon['rarity'])
             embed.add_field(name="Description", value=domon['description'], inline=False)
             embed.set_footer(text="Use !scan to be the first and unlock !capture!")
-            try:
-                await channel.send(embed=embed)
-            except discord.HTTPException as e:
-                if e.status == 429:
-                    await asyncio.sleep(2.0)
+            await channel.send(embed=embed)
 
 @bot.command(name="scan")
 @commands.cooldown(1, 3, commands.BucketType.user)
@@ -2359,13 +2333,13 @@ async def scan(ctx):
     async with scan_lock:
         s = load_state()
         if not s["active_spawn"] or not s["spawned_domon"]:
-            await safe_send(ctx, "No DOMON to scan right now.")
+            await ctx.send("No DOMON to scan right now.")
             return
         if s["scan_claimed"]:
-            await safe_send(ctx, "Someone already scanned this DOMON! Only the first scanner can attempt capture.")
+            await ctx.send("Someone already scanned this DOMON! Only the first scanner can attempt capture.")
             return
         if str(ctx.author.id) not in players:
-            await safe_send(ctx, "Type !start to begin your hunt!")
+            await ctx.send("Type !start to begin your hunt!")
             return
         claim_scan(str(ctx.author.id))
         domon = get_current_domon()
@@ -2377,7 +2351,7 @@ async def scan(ctx):
         embed.add_field(name="Type", value=domon['type'])
         embed.add_field(name="Rarity", value=domon['rarity'])
         embed.add_field(name="Description", value=domon['description'], inline=False)
-        await safe_send(ctx, content=ctx.author.mention, embed=embed)
+        await ctx.send(content=ctx.author.mention, embed=embed)
         if scan_timer_task is None:
             scan_timer_task = asyncio.create_task(timeout_scan(ctx))
 
@@ -2393,28 +2367,28 @@ async def capture(ctx):
 
         if is_scan_expired():
             scan_expired()
-            await safe_send(ctx, "⏰ Time's up! The DOMON was not captured. Anyone can !scan again.")
+            await ctx.send("⏰ Time's up! The DOMON was not captured. Anyone can !scan again.")
             scan_timer_task = None
             return
 
         if not s["active_spawn"] or not domon:
-            await safe_send(ctx, "No DOMON to capture.")
+            await ctx.send("No DOMON to capture.")
             return
 
         if not player:
-            await safe_send(ctx, "Type !start to begin your hunt!")
+            await ctx.send("Type !start to begin your hunt!")
             return
 
         if s["scan_claimed"] != user_id:
-            await safe_send(ctx, "Only the **first** player who scanned this DOMON can try to capture it!")
+            await ctx.send("Only the **first** player who scanned this DOMON can try to capture it!")
             return
 
         if s["capture_attempted"] == user_id:
-            await safe_send(ctx, "You already tried to capture this DOMON. Wait for another scan!")
+            await ctx.send("You already tried to capture this DOMON. Wait for another scan!")
             return
 
         if s["capture_attempted"] is not None:
-            await safe_send(ctx, "A capture attempt has already been made for this DOMON. Wait for the next scan!")
+            await ctx.send("A capture attempt has already been made for this DOMON. Wait for the next scan!")
             return
 
         mark_attempt(user_id)
@@ -2422,15 +2396,13 @@ async def capture(ctx):
         has_perfect = player["inventory"].get("PerfectDomoball", 0) > 0
         has_regular = player["inventory"].get("Domoball", 0) > 0
         if not has_perfect and not has_regular:
-            await safe_send(
-                ctx,
+            await ctx.send(
                 f"{ctx.author.mention} you have no Domoballs or PerfectDomoball left! "
                 "You lose the right to capture this DOMON. Someone else can now !scan and try!"
             )
             fail_capture()
             return
 
-        # PERFECT: succès garanti
         if has_perfect:
             player["inventory"]["PerfectDomoball"] -= 1
             if player["inventory"]["PerfectDomoball"] == 0:
@@ -2450,11 +2422,10 @@ async def capture(ctx):
             evo_msg = check_evolution(user_id)
             if evo_msg:
                 msg += f"\n{evo_msg}"
-            await safe_send(ctx, msg)
+            await ctx.send(msg)
             success_capture()
             return
 
-        # REGULAR capture (avec SpectraSeal reroll)
         rates = {"Common": 0.90, "Uncommon": 0.65, "Rare": 0.30, "Legendary": 0.10}
         base_success = rates.get(domon["rarity"], 0.5)
 
@@ -2484,7 +2455,7 @@ async def capture(ctx):
                 player["inventory"][item] = player["inventory"].get(item, 0) + 1
                 save_players(players)
                 msg += f"\nMilestone: {player['xp']} XP → Bonus item: **{item}**!"
-            await safe_send(ctx, msg)
+            await ctx.send(msg)
             success_capture()
             return
         else:
@@ -2494,25 +2465,26 @@ async def capture(ctx):
                 "So close... but it’s gone!",
                 "❌ The DOMON got away!"
             ]
-            await safe_send(ctx, random.choice(fail_msgs))
+            await ctx.send(random.choice(fail_msgs))
             fail_capture()
             return
 
 @bot.command(name="forcespawn")
-@owner_only
+@owner_only()
 async def forcespawn(ctx):
-    global last_forcespawn_ts
-    async with spawn_lock:
-        # pas de clear_spawn séparé -> set atomique
+    # Evite les courses avec la loop de spawn
+    async with scan_lock:
+        clear_spawn()
         domon = random.choice(DOMON_LIST)
         set_spawned_domon(domon)
         intro_msg = domon_intro_message(domon)
+        # ENVOIE UNIQUEMENT DANS LE SALON DE SPAWN OFFICIEL pour éviter 2 messages
+        channel = bot.get_channel(config.get("spawn_channel_id")) or ctx.channel
         embed = discord.Embed(title="(Admin) Forced Spawn", description=intro_msg, color=0xe67e22)
         embed.add_field(name="Type", value=domon['type'])
         embed.add_field(name="Rarity", value=domon['rarity'])
         embed.add_field(name="Description", value=domon['description'], inline=False)
-        await safe_send(ctx, embed=embed)
-        last_forcespawn_ts = time.monotonic()
+        await channel.send(embed=embed)
 
 def check_evolution(user_id):
     player = players[user_id]
@@ -2540,7 +2512,7 @@ def check_evolution(user_id):
 # =========================
 from discord.ui import View, Button, Select
 
-ACTIVE_BATTLE = {}
+ACTIVE_BATTLE = {}  # {guild_id: (player1_id, player2_id)}
 BATTLE_TIMEOUT = 60
 
 def get_player_domons(user_id):
@@ -2601,34 +2573,31 @@ def compute_damage(move, atk_stats, def_stats, crit=False):
 @commands.cooldown(1, 5, commands.BucketType.user)
 async def battle(ctx, opponent: discord.Member):
     if ctx.guild.id in ACTIVE_BATTLE:
-        await safe_send(ctx, "A battle is already ongoing in this server. Please wait for it to finish.")
+        await ctx.send("A battle is already ongoing in this server. Please wait for it to finish.")
         return
     p1 = str(ctx.author.id)
     p2 = str(opponent.id)
     if p1 == p2:
-        await safe_send(ctx, "You cannot battle yourself!")
+        await ctx.send("You cannot battle yourself!")
         return
     if p1 not in players or not get_player_domons(p1):
-        await safe_send(ctx, f"{ctx.author.mention}, you need at least 1 DOMON to battle. Use !capture to catch one!")
+        await ctx.send(f"{ctx.author.mention}, you need at least 1 DOMON to battle. Use !capture to catch one!")
         return
     if p2 not in players or not get_player_domons(p2):
-        await safe_send(ctx, f"{opponent.mention} has no DOMON to battle.")
+        await ctx.send(f"{opponent.mention} has no DOMON to battle.")
         return
 
-    await safe_send(ctx, f"⚔️ {ctx.author.mention} has challenged {opponent.mention} to a DOMON battle!\nEach player, check your DMs to pick your DOMON.")
+    await ctx.send(f"⚔️ {ctx.author.mention} has challenged {opponent.mention} to a DOMON battle!\nEach player, check your DMs to pick your DOMON.")
     domons1 = get_player_domons(p1)
     select1 = DomonSelectView(domons1)
     try:
         await ctx.author.send("Pick your DOMON for the battle:", view=select1)
     except discord.Forbidden:
-        await safe_send(ctx, "I can't DM you. Please enable DMs from server members and retry.")
+        await ctx.send("I can't DM you. Please enable DMs from server members and retry.")
         return
     await select1.wait()
     if select1.domon is None:
-        try:
-            await ctx.author.send("Timeout! Battle canceled.")
-        except discord.Forbidden:
-            pass
+        await ctx.author.send("Timeout! Battle canceled.")
         return
     my_domon = domons1[select1.domon]
 
@@ -2637,22 +2606,18 @@ async def battle(ctx, opponent: discord.Member):
     try:
         await opponent.send("Pick your DOMON for the battle:", view=select2)
     except discord.Forbidden:
-        await safe_send(ctx, "I can't DM your opponent. Battle canceled.")
+        await ctx.send("I can't DM your opponent. Battle canceled.")
         return
     await select2.wait()
     if select2.domon is None:
-        try:
-            await opponent.send("Timeout! Battle canceled.")
-        except discord.Forbidden:
-            pass
+        await opponent.send("Timeout! Battle canceled.")
         return
     opp_domon = domons2[select2.domon]
 
     ACTIVE_BATTLE[ctx.guild.id] = (p1, p2)
     channel = bot.get_channel(config.get("spawn_channel_id")) or ctx.channel
 
-    await safe_send(
-        channel,
+    await channel.send(
         f"🔥 **DOMON BATTLE:** {ctx.author.mention} (**{my_domon['name']}**) vs {opponent.mention} (**{opp_domon['name']}**)\n"
         f"Let the battle begin! Each turn, click your attack. You have {BATTLE_TIMEOUT}s to answer, or your turn is skipped."
     )
@@ -2680,8 +2645,7 @@ async def battle(ctx, opponent: discord.Member):
 
         allowed = active.id
         atk_view = AttackView(a_domon, allowed_user_id=allowed)
-        atk_msg = await safe_send(
-            channel,
+        atk_msg = await channel.send(
             f"{active.mention}'s turn! (**{a_domon['name']}**, {hp1 if turn==0 else hp2} HP)\n"
             f"{defending.display_name}'s {d_domon['name']} HP: `{hp_bar(hp2 if turn==0 else hp1, max_hp2 if turn==0 else max_hp1)}`",
             view=atk_view,
@@ -2689,7 +2653,7 @@ async def battle(ctx, opponent: discord.Member):
         await atk_view.wait()
 
         if atk_view.chosen is None:
-            await safe_send(channel, f"⏳ {active.display_name} didn't choose an attack in time! Turn skipped.")
+            await channel.send(f"⏳ {active.display_name} didn't choose an attack in time! Turn skipped.")
             if buffs["p1_def_up"] > 0: buffs["p1_def_up"] -= 1
             if buffs["p2_def_up"] > 0: buffs["p2_def_up"] -= 1
             turn = 1 - turn
@@ -2708,7 +2672,7 @@ async def battle(ctx, opponent: discord.Member):
                 buffs["p1_def_up"] = 2
             else:
                 buffs["p2_def_up"] = 2
-            await safe_send(channel, f"🛡️ {active.display_name}'s **{move['name']}** grants a shield: DEF ↑ 2 turns!")
+            await channel.send(f"🛡️ {active.display_name}'s **{move['name']}** grants a shield: DEF ↑ 2 turns!")
         elif hit:
             crit = random.random() < 0.10
             dmg = compute_damage(move, a_stats, d_stats, crit=crit)
@@ -2718,14 +2682,13 @@ async def battle(ctx, opponent: discord.Member):
                 hp1 -= dmg
 
             crit_txt = " **(CRIT!)**" if crit else ""
-            await safe_send(
-                channel,
+            await channel.send(
                 f"💥 {active.display_name}'s **{move['name']}** hits for **{dmg}** damage!{crit_txt}\n"
                 f"{defending.display_name}'s {d_domon['name']} HP: `{hp_bar(hp2 if turn==0 else hp1, max_hp2 if turn==0 else max_hp1)}` "
                 f"({max(0, hp2 if turn==0 else hp1)}/{max_hp2 if turn==0 else max_hp1})"
             )
         else:
-            await safe_send(channel, f"😬 {active.display_name}'s **{move['name']}** missed!")
+            await channel.send(f"😬 {active.display_name}'s **{move['name']}** missed!")
 
         if buffs["p1_def_up"] > 0: buffs["p1_def_up"] -= 1
         if buffs["p2_def_up"] > 0: buffs["p2_def_up"] -= 1
@@ -2736,7 +2699,7 @@ async def battle(ctx, opponent: discord.Member):
     if hp1 <= 0 or hp2 <= 0:
         winner = ctx.author if hp2 <= 0 else opponent
         loser = opponent if winner == ctx.author else ctx.author
-        await safe_send(channel, f"🏆 **{winner.display_name}** wins the DOMON battle against {loser.display_name}!")
+        await channel.send(f"🏆 **{winner.display_name}** wins the DOMON battle against {loser.display_name}!")
         win_player = players[str(winner.id)]
         win_player["xp"] += 2
         save_players(players)
@@ -2747,46 +2710,37 @@ async def battle(ctx, opponent: discord.Member):
 # ==========================
 # --- Flask keep-alive   ---
 # ==========================
-keep_alive()
+if ENABLE_WEB:
+    keep_alive()
 
 # ==========================
-# --- Boot avec backoff  ---
+# --- Robust bot runner  ---
 # ==========================
-async def run_bot():
-    if not TOKEN:
-        print("❌ ERROR: DISCORD_TOKEN is not set. Configure it in Render → Environment.", flush=True)
-        sys.exit(1)
-    # Si token invalide, on ne boucle pas éternellement
-    from discord.errors import LoginFailure, HTTPException
-    backoff = 5
+async def run_bot_with_backoff():
+    """
+    Evite les boucles 429: en cas d'échec de login (HTTP 429),
+    attend de plus en plus longtemps avant de réessayer.
+    """
+    backoff = 15  # secondes
     while True:
         try:
             await bot.start(TOKEN)
-        except LoginFailure as e:
-            print("❌ LoginFailure: invalid DISCORD_TOKEN. Check the token in Render.", flush=True)
-            sys.exit(1)
-        except HTTPException as e:
-            # Cloudflare 429 côté gateway/API → on backoff
-            if e.status == 429:
-                print(f"⚠️ HTTP 429 at login/start. Retrying in {backoff}s...", flush=True)
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 300)
+        except discord.HTTPException as e:
+            # Discord via Cloudflare: on voit souvent status 429 au démarrage si trop de restarts
+            if getattr(e, "status", None) == 429:
+                print(f"⚠️ HTTP 429 at login/start. Retrying in {backoff}s...")
+                await asyncio.sleep(backoff + random.randint(0, 5))
+                backoff = min(backoff * 2, 600)  # cap 10 min
                 continue
             else:
-                print(f"⚠️ HTTPException {e.status}: {e}. Retrying in {backoff}s...", flush=True)
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 300)
-                continue
+                raise
         except Exception as e:
-            print(f"Bot crashed unexpectedly: {e}", flush=True)
-            await asyncio.sleep(backoff)
-            backoff = min(backoff * 2, 300)
-            continue
-        break
+            print("Bot crashed:", e)
+            await asyncio.sleep(10)
+        else:
+            break  # proprement arrêté (logout)
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(run_bot())
-    except KeyboardInterrupt:
-        print("Shutting down...")
-
+    if not TOKEN:
+        raise RuntimeError("DISCORD_TOKEN manquant dans les variables d'environnement.")
+    asyncio.run(run_bot_with_backoff())
