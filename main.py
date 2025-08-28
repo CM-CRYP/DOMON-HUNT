@@ -24,7 +24,7 @@ OWNER_ID = str(os.getenv("OWNER_ID", "865185894197887018")).strip()
 ENABLE_WEB = os.getenv("ENABLE_WEB", "1") == "1"
 
 # Jitter au boot pour éviter les collisions sur IP partagée (Cloudflare 1015)
-# Exemple: STARTUP_JITTER_MAX=45 => dors 0..45s aléatoires avant de te connecter
+# Ex: mets STARTUP_JITTER_MAX=180 (3 min) dans Render → le bot attendra 0..180s avant de se connecter
 STARTUP_JITTER_MAX = int(os.getenv("STARTUP_JITTER_MAX", "0"))
 
 print(f"BOOT: __name__={__name__} py={sys.version.split()[0]} ENABLE_WEB={ENABLE_WEB} JITTER_MAX={STARTUP_JITTER_MAX}")
@@ -287,7 +287,7 @@ def load_config():
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
     except Exception as e:
-        print("⚠️ config.json read error, using default:", e)
+        print("⚠️ config.json read error:", e)
     return {"spawn_channel_id": None}
 
 def save_config(cfg):
@@ -296,7 +296,7 @@ def save_config(cfg):
             json.dump(cfg, f, ensure_ascii=False, indent=2)
     except Exception as e:
         print("⚠️ config.json write error:", e)
-
+        
 # ------- Liste des 151 DOMON (évolutions incluses) -------
 DOMON_LIST = [
     {
@@ -2350,7 +2350,8 @@ async def spawn_task():
             if random.random() > chance:
                 return
 
-            await cancel_scan_timer()  # safety
+            # safety
+            await cancel_scan_timer()
 
             domon = random.choices(DOMON_LIST, weights=[RARITY_PROBA.get(d["rarity"], 10) for d in DOMON_LIST], k=1)[0]
             set_spawned_domon(domon)
@@ -2808,36 +2809,32 @@ if ENABLE_WEB:
 if __name__ == "__main__":
     if not TOKEN:
         raise RuntimeError("DISCORD_TOKEN manquant dans les variables d'environnement.")
+
+    # Jitter de démarrage (optionnel) pour éviter les rafales d'IP
     if STARTUP_JITTER_MAX > 0:
         d = random.randint(0, STARTUP_JITTER_MAX)
         print(f"Boot jitter: sleeping {d}s before Discord login to avoid shared-IP bursts…")
         time.sleep(d)
 
     print(f"ENV check: DISCORD_TOKEN length = {len(TOKEN)} chars")
-    # Backoff anti-Cloudflare 1015 (429) au LOGIN
-    backoff = 60  # commence à 60s
-    while True:
-        try:
-            print("→ Connecting to Discord Gateway via bot.run() …")
-            bot.run(TOKEN)
-            break  # sortie propre
-        except LoginFailure:
-            print("❌ LoginFailure: token invalide. Regénère le dans le Developer Portal et mets-le dans DISCORD_TOKEN.")
-            raise
-        except PrivilegedIntentsRequired:
-            print("❌ PrivilegedIntentsRequired: active MESSAGE CONTENT et SERVER MEMBERS dans le Developer Portal.")
-            raise
-        except HTTPException as e:
-            # Cloudflare côté discord.com : 1015 / 429 lors du /users/@me
-            if getattr(e, "status", None) == 429:
-                jitter = random.randint(0, 30)
-                wait = min(backoff, 900) + jitter  # cap 15 min + jitter
-                print(f"⚠️ HTTP 429 on login (likely Cloudflare 1015). Sleeping {wait}s then retry…")
-                time.sleep(wait)
-                backoff = min(backoff * 2, 900)
-                continue
-            else:
-                print(f"⚠️ HTTPException during login/start (status={getattr(e,'status','?')}): {e}")
-                # Attente défensive pour éviter de spammer
-                time.sleep(60 + random.randint(0, 30))
-                continue
+    print("→ Connecting to Discord Gateway via bot.run() …")
+    try:
+        # IMPORTANT : on appelle bot.run() **une seule fois**
+        # Si Discord (Cloudflare) refuse au login (1015/429), on laisse le process sortir
+        # Render redémarrera proprement le conteneur plus tard, sans “Session is closed”.
+        bot.run(TOKEN)
+    except LoginFailure:
+        print("❌ LoginFailure: token invalide. Regénère-le dans le Developer Portal et mets-le dans DISCORD_TOKEN.")
+        raise
+    except PrivilegedIntentsRequired:
+        print("❌ PrivilegedIntentsRequired: active MESSAGE CONTENT et SERVER MEMBERS dans le Developer Portal.")
+        raise
+    except HTTPException as e:
+        # S'il y a un 429 dur pendant /users/@me, on sort proprement.
+        if getattr(e, "status", None) == 429:
+            print("⚠️ HTTP 429 au login (Cloudflare 1015 côté discord.com). Sortie du process pour redémarrage propre par Render.")
+            # Code de sortie non-zero pour que Render redémarre
+            sys.exit(1)
+        else:
+            print(f"⚠️ HTTPException during login/start (status={getattr(e,'status','?')}): {e}")
+            sys.exit(1)
