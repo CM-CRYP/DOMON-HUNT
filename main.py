@@ -6,6 +6,7 @@ import unicodedata
 import discord
 import random
 import asyncio
+import traceback
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
 from threading import Thread
@@ -23,8 +24,7 @@ TOKEN = os.getenv("DISCORD_TOKEN", "")
 OWNER_ID = str(os.getenv("OWNER_ID", "865185894197887018")).strip()
 ENABLE_WEB = os.getenv("ENABLE_WEB", "1") == "1"
 
-# Jitter au boot pour éviter les collisions sur IP partagée (Cloudflare 1015)
-# Ex: mets STARTUP_JITTER_MAX=180 (3 min) dans Render → le bot attendra 0..180s avant de se connecter
+# Jitter au boot pour éviter les collisions d'IP (Cloudflare 1015)
 STARTUP_JITTER_MAX = int(os.getenv("STARTUP_JITTER_MAX", "0"))
 
 print(f"BOOT: __name__={__name__} py={sys.version.split()[0]} ENABLE_WEB={ENABLE_WEB} JITTER_MAX={STARTUP_JITTER_MAX}")
@@ -154,6 +154,7 @@ scan_timer_task = None
 
 SCAN_WINDOW_SECONDS = 120
 BATTLE_TIMEOUT = 60
+MAX_SELECT_OPTIONS = 25  # Limite Discord
 
 # --------- Helpers encodage / temps ----------
 def normalize_str(s: str) -> str:
@@ -296,7 +297,7 @@ def save_config(cfg):
             json.dump(cfg, f, ensure_ascii=False, indent=2)
     except Exception as e:
         print("⚠️ config.json write error:", e)
-        
+
 # ------- Liste des 151 DOMON (évolutions incluses) -------
 DOMON_LIST = [
     {
@@ -2350,8 +2351,7 @@ async def spawn_task():
             if random.random() > chance:
                 return
 
-            # safety
-            await cancel_scan_timer()
+            await cancel_scan_timer()  # safety
 
             domon = random.choices(DOMON_LIST, weights=[RARITY_PROBA.get(d["rarity"], 10) for d in DOMON_LIST], k=1)[0]
             set_spawned_domon(domon)
@@ -2561,23 +2561,31 @@ def get_player_domons(user_id):
 class DomonSelectView(View):
     def __init__(self, domons):
         super().__init__(timeout=60)
+        # Tronquer à 25 options max (limite Discord)
+        shown = domons[:MAX_SELECT_OPTIONS]
         options = [
             discord.SelectOption(
                 label=f"{d['name']} ({d['rarity']})",
                 value=str(i),
                 description=d['description'][:90]
-            ) for i, d in enumerate(domons)
+            ) for i, d in enumerate(shown)
         ]
         self.domon = None
         self.select = Select(placeholder="Choose your DOMON", options=options, min_values=1, max_values=1)
         self.select.callback = self.selected
         self.add_item(self.select)
+        self.total = len(domons)
+        self.shown = len(shown)
 
     async def selected(self, interaction):
         self.domon = int(self.select.values[0])
         self.stop()
+        # En DM, les messages "ephemeral=True" ne sont pas supportés → ignore l'erreur
         try:
-            await interaction.response.send_message(f"You chose **{self.select.options[self.domon].label}**!", ephemeral=True)
+            suffix = ""
+            if self.total > self.shown:
+                suffix = f" (showing first {self.shown} of {self.total})"
+            await interaction.response.send_message(f"You chose **{self.select.options[self.domon].label}**!{suffix}", ephemeral=True)
         except Exception:
             pass
 
@@ -2618,6 +2626,9 @@ def compute_damage(move, atk_stats, def_stats, crit=False):
 @bot.command(name="battle")
 @commands.cooldown(1, 5, commands.BucketType.user)
 async def battle(ctx, opponent: discord.Member):
+    if ctx.guild is None:
+        await ctx.send("Use this command in a server channel.")
+        return
     if ctx.guild.id in ACTIVE_BATTLE:
         await ctx.send("A battle is already ongoing in this server. Please wait for it to finish.")
         return
@@ -2635,11 +2646,13 @@ async def battle(ctx, opponent: discord.Member):
 
     ACTIVE_BATTLE[ctx.guild.id] = (p1, p2)
     try:
-        await ctx.send(f"⚔️ {ctx.author.mention} has challenged {opponent.mention} to a DOMON battle!\nEach player, check your DMs to pick your DOMON.")
+        # Joueur 1
         domons1 = get_player_domons(p1)
+        shown1 = min(len(demons1:=domons1), MAX_SELECT_OPTIONS)
+        note1 = f" (showing first {shown1} of {len(demons1)})" if len(demons1) > shown1 else ""
         select1 = DomonSelectView(domons1)
         try:
-            await ctx.author.send("Pick your DOMON for the battle:", view=select1)
+            await ctx.author.send("Pick your DOMON for the battle:" + note1, view=select1)
         except discord.Forbidden:
             await ctx.send("I can't DM you. Please enable DMs from server members and retry.")
             return
@@ -2652,10 +2665,13 @@ async def battle(ctx, opponent: discord.Member):
             return
         my_domon = domons1[select1.domon]
 
+        # Joueur 2
         domons2 = get_player_domons(p2)
+        shown2 = min(len(demons2:=domons2), MAX_SELECT_OPTIONS)
+        note2 = f" (showing first {shown2} of {len(demons2)})" if len(demons2) > shown2 else ""
         select2 = DomonSelectView(domons2)
         try:
-            await opponent.send("Pick your DOMON for the battle:", view=select2)
+            await opponent.send("Pick your DOMON for the battle:" + note2, view=select2)
         except discord.Forbidden:
             await ctx.send("I can't DM your opponent. Battle canceled.")
             return
@@ -2669,6 +2685,7 @@ async def battle(ctx, opponent: discord.Member):
         opp_domon = domons2[select2.domon]
 
         channel = bot.get_channel(config.get("spawn_channel_id")) or ctx.channel
+        await ctx.send(f"⚔️ {ctx.author.mention} has challenged {opponent.mention} to a DOMON battle!")
         await channel.send(
             f"🔥 **DOMON BATTLE:** {ctx.author.mention} (**{my_domon['name']}**) vs {opponent.mention} (**{opp_domon['name']}**)\n"
             f"Let the battle begin! Each turn, click your attack. You have {BATTLE_TIMEOUT}s to answer, or your turn is skipped."
@@ -2762,7 +2779,7 @@ async def battle(ctx, opponent: discord.Member):
             save_players(players)
     finally:
         try:
-            if ctx.guild.id in ACTIVE_BATTLE:
+            if ctx.guild and ctx.guild.id in ACTIVE_BATTLE:
                 del ACTIVE_BATTLE[ctx.guild.id]
         except Exception:
             pass
@@ -2788,17 +2805,24 @@ async def scan_expired(ctx):
 # ==========================
 @bot.event
 async def on_command_error(ctx, error):
-    if isinstance(error, commands.CommandOnCooldown):
-        try:
-            await ctx.send(f"⏳ Slow down! Try again in {error.retry_after:.1f}s.")
-        except Exception:
-            pass
+    # Messages clairs pour les erreurs courantes
+    if isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send("Usage: `!battle @membre`")
         return
+    if isinstance(error, commands.BadArgument):
+        await ctx.send("Je n'ai pas trouvé ce membre. Mentionne-le: `!battle @pseudo`")
+        return
+    if isinstance(error, commands.CommandOnCooldown):
+        await ctx.send(f"⏳ Slow down! Try again in {error.retry_after:.1f}s.")
+        return
+
+    # Sinon, message générique + traceback pour debug côté logs
     try:
         await ctx.send("⚠️ An error occurred while processing that command.")
     except Exception:
         pass
     print("Command error:", repr(error))
+    traceback.print_exception(type(error), error, error.__traceback__)
 
 # ==========================
 # --- Entrée du programme ---
@@ -2810,7 +2834,6 @@ if __name__ == "__main__":
     if not TOKEN:
         raise RuntimeError("DISCORD_TOKEN manquant dans les variables d'environnement.")
 
-    # Jitter de démarrage (optionnel) pour éviter les rafales d'IP
     if STARTUP_JITTER_MAX > 0:
         d = random.randint(0, STARTUP_JITTER_MAX)
         print(f"Boot jitter: sleeping {d}s before Discord login to avoid shared-IP bursts…")
@@ -2819,21 +2842,16 @@ if __name__ == "__main__":
     print(f"ENV check: DISCORD_TOKEN length = {len(TOKEN)} chars")
     print("→ Connecting to Discord Gateway via bot.run() …")
     try:
-        # IMPORTANT : on appelle bot.run() **une seule fois**
-        # Si Discord (Cloudflare) refuse au login (1015/429), on laisse le process sortir
-        # Render redémarrera proprement le conteneur plus tard, sans “Session is closed”.
         bot.run(TOKEN)
     except LoginFailure:
-        print("❌ LoginFailure: token invalide. Regénère-le dans le Developer Portal et mets-le dans DISCORD_TOKEN.")
+        print("❌ LoginFailure: token invalide. Regénère-le et mets-le dans DISCORD_TOKEN.")
         raise
     except PrivilegedIntentsRequired:
-        print("❌ PrivilegedIntentsRequired: active MESSAGE CONTENT et SERVER MEMBERS dans le Developer Portal.")
+        print("❌ PrivilegedIntentsRequired: active MESSAGE CONTENT + SERVER MEMBERS dans le Developer Portal.")
         raise
     except HTTPException as e:
-        # S'il y a un 429 dur pendant /users/@me, on sort proprement.
         if getattr(e, "status", None) == 429:
-            print("⚠️ HTTP 429 au login (Cloudflare 1015 côté discord.com). Sortie du process pour redémarrage propre par Render.")
-            # Code de sortie non-zero pour que Render redémarre
+            print("⚠️ HTTP 429 au login (Cloudflare 1015 côté discord.com). Sortie pour redémarrage par Render.")
             sys.exit(1)
         else:
             print(f"⚠️ HTTPException during login/start (status={getattr(e,'status','?')}): {e}")
