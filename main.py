@@ -2580,12 +2580,15 @@ class DomonSelectView(View):
     async def selected(self, interaction):
         self.domon = int(self.select.values[0])
         self.stop()
-        # En DM, les messages "ephemeral=True" ne sont pas supportés → ignore l'erreur
+        # En DM, ephemeral peut échouer → ignorer
         try:
             suffix = ""
             if self.total > self.shown:
                 suffix = f" (showing first {self.shown} of {self.total})"
-            await interaction.response.send_message(f"You chose **{self.select.options[self.domon].label}**!{suffix}", ephemeral=True)
+            await interaction.response.send_message(
+                f"You chose **{self.select.options[self.domon].label}**!{suffix}",
+                ephemeral=True
+            )
         except Exception:
             pass
 
@@ -2623,20 +2626,58 @@ def compute_damage(move, atk_stats, def_stats, crit=False):
         dmg = int(dmg * 1.5)
     return dmg
 
+# --- helper pour résoudre un membre depuis mention/ID/texte ---
+async def resolve_member(ctx, raw: str | None):
+    # 1) mention directe dans le message
+    if ctx.message.mentions:
+        return ctx.message.mentions[0]
+
+    if not raw:
+        return None
+
+    text = raw.strip()
+
+    # 2) tentative via converter standard (gère ID, mention, etc.)
+    try:
+        conv = commands.MemberConverter()
+        member = await conv.convert(ctx, text)
+        return member
+    except Exception:
+        pass
+
+    # 3) si on voit une forme <@123> ou <@!123>, extraire l'ID
+    cleaned = text.replace("<", "").replace(">", "").replace("@", "").replace("!", "")
+    if cleaned.isdigit():
+        m = ctx.guild.get_member(int(cleaned))
+        if m:
+            return m
+
+    # 4) recherche approx par display_name ou name (début de chaîne)
+    key = text.lower()
+    for m in ctx.guild.members:
+        if m.display_name.lower().startswith(key) or m.name.lower().startswith(key):
+            return m
+
+    return None
+
 @bot.command(name="battle")
 @commands.cooldown(1, 5, commands.BucketType.user)
-async def battle(ctx, opponent: discord.Member):
+async def battle(ctx, *, opponent_raw: str = None):
     if ctx.guild is None:
         await ctx.send("Use this command in a server channel.")
         return
-    if ctx.guild.id in ACTIVE_BATTLE:
-        await ctx.send("A battle is already ongoing in this server. Please wait for it to finish.")
+
+    opponent = await resolve_member(ctx, opponent_raw)
+    if opponent is None:
+        await ctx.send("Usage: `!battle @membre` (mentionne quelqu'un ou tape son pseudo).")
         return
-    p1 = str(ctx.author.id)
-    p2 = str(opponent.id)
-    if p1 == p2:
+
+    if ctx.author.id == opponent.id:
         await ctx.send("You cannot battle yourself!")
         return
+
+    p1 = str(ctx.author.id)
+    p2 = str(opponent.id)
     if p1 not in players or not get_player_domons(p1):
         await ctx.send(f"{ctx.author.mention}, you need at least 1 DOMON to battle. Use !capture to catch one!")
         return
@@ -2644,15 +2685,21 @@ async def battle(ctx, opponent: discord.Member):
         await ctx.send(f"{opponent.mention} has no DOMON to battle.")
         return
 
+    if ctx.guild.id in ACTIVE_BATTLE:
+        await ctx.send("A battle is already ongoing in this server. Please wait for it to finish.")
+        return
+
     ACTIVE_BATTLE[ctx.guild.id] = (p1, p2)
+
     try:
         # Joueur 1
         domons1 = get_player_domons(p1)
-        shown1 = min(len(demons1:=domons1), MAX_SELECT_OPTIONS)
-        note1 = f" (showing first {shown1} of {len(demons1)})" if len(demons1) > shown1 else ""
         select1 = DomonSelectView(domons1)
         try:
-            await ctx.author.send("Pick your DOMON for the battle:" + note1, view=select1)
+            await ctx.author.send(
+                "Pick your DOMON for the battle:" + (f" (showing first {min(len(domons1), 25)} of {len(domons1)})" if len(domons1) > 25 else ""),
+                view=select1
+            )
         except discord.Forbidden:
             await ctx.send("I can't DM you. Please enable DMs from server members and retry.")
             return
@@ -2667,11 +2714,12 @@ async def battle(ctx, opponent: discord.Member):
 
         # Joueur 2
         domons2 = get_player_domons(p2)
-        shown2 = min(len(demons2:=domons2), MAX_SELECT_OPTIONS)
-        note2 = f" (showing first {shown2} of {len(demons2)})" if len(demons2) > shown2 else ""
         select2 = DomonSelectView(domons2)
         try:
-            await opponent.send("Pick your DOMON for the battle:" + note2, view=select2)
+            await opponent.send(
+                "Pick your DOMON for the battle:" + (f" (showing first {min(len(domons2), 25)} of {len(domons2)})" if len(domons2) > 25 else ""),
+                view=select2
+            )
         except discord.Forbidden:
             await ctx.send("I can't DM your opponent. Battle canceled.")
             return
@@ -2691,36 +2739,27 @@ async def battle(ctx, opponent: discord.Member):
             f"Let the battle begin! Each turn, click your attack. You have {BATTLE_TIMEOUT}s to answer, or your turn is skipped."
         )
 
-        max_hp1 = my_domon["stats"]["hp"]
-        max_hp2 = opp_domon["stats"]["hp"]
-        hp1 = max_hp1
-        hp2 = max_hp2
-
+        max_hp1 = my_domon["stats"]["hp"]; hp1 = max_hp1
+        max_hp2 = opp_domon["stats"]["hp"]; hp2 = max_hp2
         buffs = {"p1_def_up": 0, "p2_def_up": 0}
-        turn = 0  # 0 = player1, 1 = player2
+        turn = 0
 
         while hp1 > 0 and hp2 > 0:
             active, defending = (ctx.author, opponent) if turn == 0 else (opponent, ctx.author)
             a_domon = my_domon if turn == 0 else opp_domon
             d_domon = opp_domon if turn == 0 else my_domon
-
             a_stats = a_domon["stats"].copy()
             d_stats = d_domon["stats"].copy()
+            if turn == 0 and buffs["p2_def_up"] > 0: d_stats["def"] = int(d_stats["def"] * 1.5)
+            if turn == 1 and buffs["p1_def_up"] > 0: d_stats["def"] = int(d_stats["def"] * 1.5)
 
-            if turn == 0 and buffs["p2_def_up"] > 0:
-                d_stats["def"] = int(d_stats["def"] * 1.5)
-            if turn == 1 and buffs["p1_def_up"] > 0:
-                d_stats["def"] = int(d_stats["def"] * 1.5)
-
-            allowed = active.id
-            atk_view = AttackView(a_domon, allowed_user_id=allowed)
+            atk_view = AttackView(a_domon, allowed_user_id=active.id)
             atk_msg = await channel.send(
                 f"{active.mention}'s turn! (**{a_domon['name']}**, {hp1 if turn==0 else hp2} HP)\n"
                 f"{defending.display_name}'s {d_domon['name']} HP: `{hp_bar(hp2 if turn==0 else hp1, max_hp2 if turn==0 else max_hp1)}`",
                 view=atk_view,
             )
             await atk_view.wait()
-
             try:
                 await atk_msg.edit(view=None)
             except Exception:
@@ -2735,29 +2774,22 @@ async def battle(ctx, opponent: discord.Member):
                 continue
 
             move = a_domon["moves"][int(atk_view.chosen)]
-
             dodge_bonus = max(0.0, (d_stats["spd"] - a_stats["spd"]) * 0.005)
-            hit_roll = random.random()
             hit_threshold = (move["accuracy"] / 100.0) * (1.0 - dodge_bonus)
-            hit = hit_roll < hit_threshold
+            hit_threshold = max(0.05, min(0.98, hit_threshold))
+            hit = random.random() < hit_threshold
 
             if move["power"] == 0:
-                if turn == 0:
-                    buffs["p1_def_up"] = 2
-                else:
-                    buffs["p2_def_up"] = 2
+                if turn == 0: buffs["p1_def_up"] = 2
+                else: buffs["p2_def_up"] = 2
                 await channel.send(f"🛡️ {active.display_name}'s **{move['name']}** grants a shield: DEF ↑ 2 turns!")
             elif hit:
                 crit = random.random() < 0.10
                 dmg = compute_damage(move, a_stats, d_stats, crit=crit)
-                if turn == 0:
-                    hp2 -= dmg
-                else:
-                    hp1 -= dmg
-
-                crit_txt = " **(CRIT!)**" if crit else ""
+                if turn == 0: hp2 -= dmg
+                else: hp1 -= dmg
                 await channel.send(
-                    f"💥 {active.display_name}'s **{move['name']}** hits for **{dmg}** damage!{crit_txt}\n"
+                    f"💥 {active.display_name}'s **{move['name']}** hits for **{dmg}** damage!{' **(CRIT!)**' if crit else ''}\n"
                     f"{defending.display_name}'s {d_domon['name']} HP: `{hp_bar(hp2 if turn==0 else hp1, max_hp2 if turn==0 else max_hp1)}` "
                     f"({max(0, hp2 if turn==0 else hp1)}/{max_hp2 if turn==0 else max_hp1})"
                 )
@@ -2766,17 +2798,15 @@ async def battle(ctx, opponent: discord.Member):
 
             if buffs["p1_def_up"] > 0: buffs["p1_def_up"] -= 1
             if buffs["p2_def_up"] > 0: buffs["p2_def_up"] -= 1
-
             turn = 1 - turn
             await asyncio.sleep(1)
 
-        if hp1 <= 0 or hp2 <= 0:
-            winner = ctx.author if hp2 <= 0 else opponent
-            loser = opponent if winner == ctx.author else ctx.author
-            await channel.send(f"🏆 **{winner.display_name}** wins the DOMON battle against {loser.display_name}!")
-            win_player = players[str(winner.id)]
-            win_player["xp"] += 2
-            save_players(players)
+        winner = ctx.author if hp2 <= 0 else opponent
+        loser = opponent if winner == ctx.author else ctx.author
+        await channel.send(f"🏆 **{winner.display_name}** wins the DOMON battle against {loser.display_name}!")
+        players[str(winner.id)]["xp"] += 2
+        save_players(players)
+
     finally:
         try:
             if ctx.guild and ctx.guild.id in ACTIVE_BATTLE:
@@ -2805,7 +2835,6 @@ async def scan_expired(ctx):
 # ==========================
 @bot.event
 async def on_command_error(ctx, error):
-    # Messages clairs pour les erreurs courantes
     if isinstance(error, commands.MissingRequiredArgument):
         await ctx.send("Usage: `!battle @membre`")
         return
@@ -2815,8 +2844,6 @@ async def on_command_error(ctx, error):
     if isinstance(error, commands.CommandOnCooldown):
         await ctx.send(f"⏳ Slow down! Try again in {error.retry_after:.1f}s.")
         return
-
-    # Sinon, message générique + traceback pour debug côté logs
     try:
         await ctx.send("⚠️ An error occurred while processing that command.")
     except Exception:
