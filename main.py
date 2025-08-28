@@ -1949,7 +1949,7 @@ DOMON_LIST = [
             {"name": "Infinity Shield", "power": 0, "accuracy": 100, "desc": "Invincible for one turn."}
         ]
     }
-
+]
 
 # --- Game Constants ---
 RARITY_PROBA = {"Common": 55, "Uncommon": 24, "Rare": 14, "Legendary": 7}
