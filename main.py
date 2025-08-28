@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 import json
 import unicodedata
 import discord
@@ -12,9 +13,7 @@ from flask import Flask
 from datetime import datetime, timezone, timedelta
 import pytz
 import requests
-
-# (facultatif) imports pour logs d'erreurs clairs
-from discord.errors import LoginFailure, PrivilegedIntentsRequired
+from discord.errors import LoginFailure, PrivilegedIntentsRequired, HTTPException
 
 # =========================
 # --- Config / ENV     ---
@@ -24,7 +23,11 @@ TOKEN = os.getenv("DISCORD_TOKEN", "")
 OWNER_ID = str(os.getenv("OWNER_ID", "865185894197887018")).strip()
 ENABLE_WEB = os.getenv("ENABLE_WEB", "1") == "1"
 
-print(f"BOOT: __name__={__name__} py={sys.version.split()[0]} ENABLE_WEB={ENABLE_WEB}")
+# Jitter au boot pour éviter les collisions sur IP partagée (Cloudflare 1015)
+# Exemple: STARTUP_JITTER_MAX=45 => dors 0..45s aléatoires avant de te connecter
+STARTUP_JITTER_MAX = int(os.getenv("STARTUP_JITTER_MAX", "0"))
+
+print(f"BOOT: __name__={__name__} py={sys.version.split()[0]} ENABLE_WEB={ENABLE_WEB} JITTER_MAX={STARTUP_JITTER_MAX}")
 print(f"BOOT: DISCORD_TOKEN present={bool(TOKEN)} length={len(TOKEN)}")
 
 # =========================
@@ -2805,15 +2808,36 @@ if ENABLE_WEB:
 if __name__ == "__main__":
     if not TOKEN:
         raise RuntimeError("DISCORD_TOKEN manquant dans les variables d'environnement.")
-    print(f"ENV check: DISCORD_TOKEN length = {len(TOKEN)} chars")
-    try:
-        print("→ Connecting to Discord Gateway via bot.run() …")
-        # bot.run gère la boucle, les reconnexions et ferme proprement la session
-        bot.run(TOKEN)
-    except LoginFailure:
-        print("❌ LoginFailure: token invalide. Regénère le dans le Developer Portal et mets-le dans DISCORD_TOKEN.")
-        raise
-    except PrivilegedIntentsRequired:
-        print("❌ PrivilegedIntentsRequired: active MESSAGE CONTENT et SERVER MEMBERS dans le Developer Portal.")
-        raise
+    if STARTUP_JITTER_MAX > 0:
+        d = random.randint(0, STARTUP_JITTER_MAX)
+        print(f"Boot jitter: sleeping {d}s before Discord login to avoid shared-IP bursts…")
+        time.sleep(d)
 
+    print(f"ENV check: DISCORD_TOKEN length = {len(TOKEN)} chars")
+    # Backoff anti-Cloudflare 1015 (429) au LOGIN
+    backoff = 60  # commence à 60s
+    while True:
+        try:
+            print("→ Connecting to Discord Gateway via bot.run() …")
+            bot.run(TOKEN)
+            break  # sortie propre
+        except LoginFailure:
+            print("❌ LoginFailure: token invalide. Regénère le dans le Developer Portal et mets-le dans DISCORD_TOKEN.")
+            raise
+        except PrivilegedIntentsRequired:
+            print("❌ PrivilegedIntentsRequired: active MESSAGE CONTENT et SERVER MEMBERS dans le Developer Portal.")
+            raise
+        except HTTPException as e:
+            # Cloudflare côté discord.com : 1015 / 429 lors du /users/@me
+            if getattr(e, "status", None) == 429:
+                jitter = random.randint(0, 30)
+                wait = min(backoff, 900) + jitter  # cap 15 min + jitter
+                print(f"⚠️ HTTP 429 on login (likely Cloudflare 1015). Sleeping {wait}s then retry…")
+                time.sleep(wait)
+                backoff = min(backoff * 2, 900)
+                continue
+            else:
+                print(f"⚠️ HTTPException during login/start (status={getattr(e,'status','?')}): {e}")
+                # Attente défensive pour éviter de spammer
+                time.sleep(60 + random.randint(0, 30))
+                continue
