@@ -12,6 +12,10 @@ from datetime import datetime, timezone, timedelta
 import pytz
 import requests
 
+# Extra imports for robust gateway handling & logs
+import aiohttp
+from discord.errors import LoginFailure, PrivilegedIntentsRequired, HTTPException
+
 # =========================
 # --- Config / ENV     ---
 # =========================
@@ -128,7 +132,7 @@ intents = discord.Intents.default()
 intents.messages = True
 intents.message_content = True
 intents.guilds = True
-intents.members = True
+intents.members = True  # needed by converters like discord.Member in !battle
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -1995,7 +1999,6 @@ def hp_bar(hp, max_hp, width=20):
 bot_ready = False
 
 async def cancel_scan_timer():
-    """Annule proprement le timer de scan s'il existe."""
     global scan_timer_task
     if scan_timer_task and not scan_timer_task.done():
         try:
@@ -2007,9 +2010,8 @@ async def cancel_scan_timer():
 @bot.event
 async def on_ready():
     global bot_ready
-    print(f"Bot ready as {bot.user}!")
-    await asyncio.sleep(1)
     bot_ready = True
+    print(f"✅ Bot ready as {bot.user} (ID {bot.user.id})")
     if not spawn_task.is_running():
         try:
             spawn_task.start()
@@ -2020,13 +2022,11 @@ def not_ready(ctx):
     return not bot_ready or players is None or config is None
 
 async def timeout_scan(ctx):
-    """Lance le chrono de 2 minutes et gère l'expiration, annulable proprement."""
     try:
         await asyncio.sleep(SCAN_WINDOW_SECONDS)
         if is_scan_expired():
             await scan_expired(ctx)
     except asyncio.CancelledError:
-        # Timer annulé volontairement (capture/fail/reset)
         return
 
 # =========================================
@@ -2343,7 +2343,7 @@ async def spawn_task():
             if random.random() > chance:
                 return
 
-            await cancel_scan_timer()  # sécurité
+            await cancel_scan_timer()  # safety
 
             domon = random.choices(DOMON_LIST, weights=[RARITY_PROBA.get(d["rarity"], 10) for d in DOMON_LIST], k=1)[0]
             set_spawned_domon(domon)
@@ -2504,7 +2504,7 @@ async def capture(ctx):
 @owner_only()
 async def forcespawn(ctx):
     async with scan_lock:
-        await cancel_scan_timer()  # sécurité
+        await cancel_scan_timer()
         clear_spawn()
         domon = random.choice(DOMON_LIST)
         set_spawned_domon(domon)
@@ -2696,7 +2696,7 @@ async def battle(ctx, opponent: discord.Member):
             )
             await atk_view.wait()
 
-            # Désactive les boutons de ce tour pour empêcher les clics tardifs
+            # Disable buttons after the turn to avoid late clicks
             try:
                 await atk_msg.edit(view=None)
             except Exception:
@@ -2754,7 +2754,6 @@ async def battle(ctx, opponent: discord.Member):
             win_player["xp"] += 2
             save_players(players)
     finally:
-        # Toujours libérer le slot de bataille
         try:
             if ctx.guild.id in ACTIVE_BATTLE:
                 del ACTIVE_BATTLE[ctx.guild.id]
@@ -2788,7 +2787,6 @@ async def on_command_error(ctx, error):
         except Exception:
             pass
         return
-    # autres erreurs: log + message générique (sans crasher)
     try:
         await ctx.send("⚠️ An error occurred while processing that command.")
     except Exception:
@@ -2805,26 +2803,64 @@ if ENABLE_WEB:
 # --- Robust bot runner  ---
 # ==========================
 async def run_bot_with_backoff():
-    backoff = 15
+    backoff = 15  # seconds
     while True:
         try:
+            print("→ Connecting to Discord Gateway…")
             await bot.start(TOKEN)
-        except discord.HTTPException as e:
+
+        except LoginFailure:
+            print("❌ LoginFailure: invalid DISCORD_TOKEN. Regenerate it in the Developer Portal and redeploy.")
+            return
+
+        except PrivilegedIntentsRequired:
+            print("❌ PrivilegedIntentsRequired: enable MESSAGE CONTENT and SERVER MEMBERS intents in the Developer Portal.")
+            return
+
+        except HTTPException as e:
             if getattr(e, "status", None) == 429:
-                print(f"⚠️ HTTP 429 at login/start. Retrying in {backoff}s...")
+                print(f"⚠️ HTTP 429 at login/start. Retrying in {backoff}s…")
                 await asyncio.sleep(backoff + random.randint(0, 5))
                 backoff = min(backoff * 2, 600)
+                try:
+                    await bot.close()
+                except Exception:
+                    pass
                 continue
             else:
-                raise
+                print(f"⚠️ HTTPException during start: status={getattr(e, 'status', '?')} detail={e}")
+                try:
+                    await bot.close()
+                except Exception:
+                    pass
+                await asyncio.sleep(10)
+                continue
+
+        except aiohttp.ClientError as e:
+            print(f"⚠️ aiohttp.ClientError: {e!r}. Retrying in {backoff}s…")
+            try:
+                await bot.close()
+            except Exception:
+                pass
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 600)
+            continue
+
         except Exception as e:
-            print("Bot crashed:", e)
+            print("⚠️ Bot crashed:", repr(e))
+            try:
+                await bot.close()
+            except Exception:
+                pass
             await asyncio.sleep(10)
+            continue
+
         else:
-            break
+            break  # clean logout
 
 if __name__ == "__main__":
     if not TOKEN:
         raise RuntimeError("DISCORD_TOKEN manquant dans les variables d'environnement.")
+    # Tip: optional quick mask to confirm token length in logs without leaking it
+    print(f"ENV check: DISCORD_TOKEN length = {len(TOKEN)} chars")
     asyncio.run(run_bot_with_backoff())
-
