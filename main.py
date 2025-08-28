@@ -1,4 +1,5 @@
 import os
+import sys
 import json
 import unicodedata
 import discord
@@ -20,9 +21,17 @@ from discord.errors import LoginFailure, PrivilegedIntentsRequired, HTTPExceptio
 # --- Config / ENV     ---
 # =========================
 load_dotenv()
-TOKEN = os.getenv("DISCORD_TOKEN")
+TOKEN = os.getenv("DISCORD_TOKEN", "")
 OWNER_ID = str(os.getenv("OWNER_ID", "865185894197887018")).strip()
 ENABLE_WEB = os.getenv("ENABLE_WEB", "1") == "1"
+
+# ⚠️ AUTOSTART DU BOT si le module est importé (ex: gunicorn main:app)
+# Mets AUTOSTART_ON_IMPORT=0 pour désactiver ce comportement.
+AUTOSTART_ON_IMPORT = os.getenv("AUTOSTART_ON_IMPORT", "1") == "1"
+
+# Logs de boot utiles
+print(f"BOOT: file={os.path.basename(__file__)} __name__={__name__} py={sys.version.split()[0]} ENABLE_WEB={ENABLE_WEB} AUTOSTART_ON_IMPORT={AUTOSTART_ON_IMPORT}")
+print(f"BOOT: DISCORD_TOKEN present={bool(TOKEN)} length={len(TOKEN)}")
 
 # =========================
 # --- Dropbox config v2 ---
@@ -124,6 +133,7 @@ def run_web():
 def keep_alive():
     t = Thread(target=run_web, daemon=True)
     t.start()
+    print("WEB: Flask keep-alive thread started.")
 
 # =============================
 # --- Discord & Global State ---
@@ -2696,7 +2706,6 @@ async def battle(ctx, opponent: discord.Member):
             )
             await atk_view.wait()
 
-            # Disable buttons after the turn to avoid late clicks
             try:
                 await atk_msg.edit(view=None)
             except Exception:
@@ -2858,9 +2867,22 @@ async def run_bot_with_backoff():
         else:
             break  # clean logout
 
+# --- Entrées : __main__ et fallback import ---
+def _start_bot_in_thread_if_needed():
+    """Démarre le bot en thread si on est importé (ex: gunicorn main:app)."""
+    if AUTOSTART_ON_IMPORT and TOKEN:
+        def _run():
+            asyncio.run(run_bot_with_backoff())
+        t = Thread(target=_run, daemon=True)
+        t.start()
+        print("BOT: autostart from import (thread) engaged.")
+
 if __name__ == "__main__":
     if not TOKEN:
         raise RuntimeError("DISCORD_TOKEN manquant dans les variables d'environnement.")
-    # Tip: optional quick mask to confirm token length in logs without leaking it
     print(f"ENV check: DISCORD_TOKEN length = {len(TOKEN)} chars")
     asyncio.run(run_bot_with_backoff())
+else:
+    # Fallback pour gunicorn/flask run (module importé)
+    _start_bot_in_thread_if_needed()
+
