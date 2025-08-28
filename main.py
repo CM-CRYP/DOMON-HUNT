@@ -13,9 +13,8 @@ from datetime import datetime, timezone, timedelta
 import pytz
 import requests
 
-# Extra imports for robust gateway handling & logs
-import aiohttp
-from discord.errors import LoginFailure, PrivilegedIntentsRequired, HTTPException
+# (facultatif) imports pour logs d'erreurs clairs
+from discord.errors import LoginFailure, PrivilegedIntentsRequired
 
 # =========================
 # --- Config / ENV     ---
@@ -25,12 +24,7 @@ TOKEN = os.getenv("DISCORD_TOKEN", "")
 OWNER_ID = str(os.getenv("OWNER_ID", "865185894197887018")).strip()
 ENABLE_WEB = os.getenv("ENABLE_WEB", "1") == "1"
 
-# ⚠️ AUTOSTART DU BOT si le module est importé (ex: gunicorn main:app)
-# Mets AUTOSTART_ON_IMPORT=0 pour désactiver ce comportement.
-AUTOSTART_ON_IMPORT = os.getenv("AUTOSTART_ON_IMPORT", "1") == "1"
-
-# Logs de boot utiles
-print(f"BOOT: file={os.path.basename(__file__)} __name__={__name__} py={sys.version.split()[0]} ENABLE_WEB={ENABLE_WEB} AUTOSTART_ON_IMPORT={AUTOSTART_ON_IMPORT}")
+print(f"BOOT: __name__={__name__} py={sys.version.split()[0]} ENABLE_WEB={ENABLE_WEB}")
 print(f"BOOT: DISCORD_TOKEN present={bool(TOKEN)} length={len(TOKEN)}")
 
 # =========================
@@ -142,7 +136,7 @@ intents = discord.Intents.default()
 intents.messages = True
 intents.message_content = True
 intents.guilds = True
-intents.members = True  # needed by converters like discord.Member in !battle
+intents.members = True  # nécessaire pour !battle @user
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -2803,86 +2797,23 @@ async def on_command_error(ctx, error):
     print("Command error:", repr(error))
 
 # ==========================
-# --- Flask keep-alive   ---
+# --- Entrée du programme ---
 # ==========================
 if ENABLE_WEB:
     keep_alive()
-
-# ==========================
-# --- Robust bot runner  ---
-# ==========================
-async def run_bot_with_backoff():
-    backoff = 15  # seconds
-    while True:
-        try:
-            print("→ Connecting to Discord Gateway…")
-            await bot.start(TOKEN)
-
-        except LoginFailure:
-            print("❌ LoginFailure: invalid DISCORD_TOKEN. Regenerate it in the Developer Portal and redeploy.")
-            return
-
-        except PrivilegedIntentsRequired:
-            print("❌ PrivilegedIntentsRequired: enable MESSAGE CONTENT and SERVER MEMBERS intents in the Developer Portal.")
-            return
-
-        except HTTPException as e:
-            if getattr(e, "status", None) == 429:
-                print(f"⚠️ HTTP 429 at login/start. Retrying in {backoff}s…")
-                await asyncio.sleep(backoff + random.randint(0, 5))
-                backoff = min(backoff * 2, 600)
-                try:
-                    await bot.close()
-                except Exception:
-                    pass
-                continue
-            else:
-                print(f"⚠️ HTTPException during start: status={getattr(e, 'status', '?')} detail={e}")
-                try:
-                    await bot.close()
-                except Exception:
-                    pass
-                await asyncio.sleep(10)
-                continue
-
-        except aiohttp.ClientError as e:
-            print(f"⚠️ aiohttp.ClientError: {e!r}. Retrying in {backoff}s…")
-            try:
-                await bot.close()
-            except Exception:
-                pass
-            await asyncio.sleep(backoff)
-            backoff = min(backoff * 2, 600)
-            continue
-
-        except Exception as e:
-            print("⚠️ Bot crashed:", repr(e))
-            try:
-                await bot.close()
-            except Exception:
-                pass
-            await asyncio.sleep(10)
-            continue
-
-        else:
-            break  # clean logout
-
-# --- Entrées : __main__ et fallback import ---
-def _start_bot_in_thread_if_needed():
-    """Démarre le bot en thread si on est importé (ex: gunicorn main:app)."""
-    if AUTOSTART_ON_IMPORT and TOKEN:
-        def _run():
-            asyncio.run(run_bot_with_backoff())
-        t = Thread(target=_run, daemon=True)
-        t.start()
-        print("BOT: autostart from import (thread) engaged.")
 
 if __name__ == "__main__":
     if not TOKEN:
         raise RuntimeError("DISCORD_TOKEN manquant dans les variables d'environnement.")
     print(f"ENV check: DISCORD_TOKEN length = {len(TOKEN)} chars")
-    asyncio.run(run_bot_with_backoff())
-else:
-    # Fallback pour gunicorn/flask run (module importé)
-    _start_bot_in_thread_if_needed()
+    try:
+        print("→ Connecting to Discord Gateway via bot.run() …")
+        # bot.run gère la boucle, les reconnexions et ferme proprement la session
+        bot.run(TOKEN)
+    except LoginFailure:
+        print("❌ LoginFailure: token invalide. Regénère le dans le Developer Portal et mets-le dans DISCORD_TOKEN.")
+        raise
+    except PrivilegedIntentsRequired:
+        print("❌ PrivilegedIntentsRequired: active MESSAGE CONTENT et SERVER MEMBERS dans le Developer Portal.")
+        raise
 
