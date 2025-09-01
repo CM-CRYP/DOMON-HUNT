@@ -24,10 +24,7 @@ TOKEN = os.getenv("DISCORD_TOKEN", "")
 OWNER_ID = str(os.getenv("OWNER_ID", "865185894197887018")).strip()
 ENABLE_WEB = os.getenv("ENABLE_WEB", "1") == "1"
 
-# Jitter au boot pour éviter les collisions d'IP (Cloudflare 1015)
-STARTUP_JITTER_MAX = int(os.getenv("STARTUP_JITTER_MAX", "0"))
-
-print(f"BOOT: __name__={__name__} py={sys.version.split()[0]} ENABLE_WEB={ENABLE_WEB} JITTER_MAX={STARTUP_JITTER_MAX}")
+print(f"BOOT: __name__={__name__} py={discord.__version__ if hasattr(discord,'__version__') else '3.x'} ENABLE_WEB={ENABLE_WEB}")
 print(f"BOOT: DISCORD_TOKEN present={bool(TOKEN)} length={len(TOKEN)}")
 
 # =========================
@@ -119,9 +116,13 @@ def download_players_dropbox():
 # ==============================
 app = Flask('')
 
-@app.route('/')
+@app.get('/')
 def home():
     return "MYIKKI Domon Bot is running!"
+
+@app.get('/health')
+def health():
+    return "OK", 200
 
 def run_web():
     port = int(os.getenv("PORT", "10000"))
@@ -2861,25 +2862,34 @@ if __name__ == "__main__":
     if not TOKEN:
         raise RuntimeError("DISCORD_TOKEN manquant dans les variables d'environnement.")
 
-    if STARTUP_JITTER_MAX > 0:
-        d = random.randint(0, STARTUP_JITTER_MAX)
-        print(f"Boot jitter: sleeping {d}s before Discord login to avoid shared-IP bursts…")
-        time.sleep(d)
-
     print(f"ENV check: DISCORD_TOKEN length = {len(TOKEN)} chars")
-    print("→ Connecting to Discord Gateway via bot.run() …")
-    try:
-        bot.run(TOKEN)
-    except LoginFailure:
-        print("❌ LoginFailure: token invalide. Regénère-le et mets-le dans DISCORD_TOKEN.")
-        raise
-    except PrivilegedIntentsRequired:
-        print("❌ PrivilegedIntentsRequired: active MESSAGE CONTENT + SERVER MEMBERS dans le Developer Portal.")
-        raise
-    except HTTPException as e:
-        if getattr(e, "status", None) == 429:
-            print("⚠️ HTTP 429 au login (Cloudflare 1015 côté discord.com). Sortie pour redémarrage par Render.")
-            sys.exit(1)
-        else:
-            print(f"⚠️ HTTPException during login/start (status={getattr(e,'status','?')}): {e}")
-            sys.exit(1)
+
+    # Boucle de backoff interne: ne quitte pas le process sur 429, réessaie proprement
+    while True:
+        try:
+            print("→ Connecting to Discord Gateway via bot.run() …")
+            bot.run(TOKEN)
+            break  # sortie propre (logout)
+        except LoginFailure:
+            print("❌ LoginFailure: token invalide. Regénère-le et mets-le dans DISCORD_TOKEN.")
+            raise
+        except PrivilegedIntentsRequired:
+            print("❌ PrivilegedIntentsRequired: active MESSAGE CONTENT + SERVER MEMBERS dans le Developer Portal.")
+            raise
+        except HTTPException as e:
+            status = getattr(e, "status", None)
+            if status == 429:
+                delay = random.randint(60, 180)
+                print(f"⚠️ HTTP 429 au login. Attente {delay}s puis retry…")
+                time.sleep(delay)
+                continue
+            else:
+                delay = 30
+                print(f"⚠️ HTTPException status={status}. Attente {delay}s puis retry…")
+                time.sleep(delay)
+                continue
+        except Exception as e:
+            delay = 20
+            print(f"⚠️ Bot crashed: {e}\n{traceback.format_exc()}\nRetry in {delay}s…")
+            time.sleep(delay)
+            continue
